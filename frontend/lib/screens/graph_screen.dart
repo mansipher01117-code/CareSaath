@@ -34,7 +34,7 @@ class GraphScreen extends StatelessWidget {
         }
         final maxRows = byCol.values.fold<int>(1, (m, l) => math.max(m, l.length));
         final height = _pad * 2 + maxRows * (_h + _gapY);
-        final width = _pad * 2 + 6 * (_w + _gapX);
+        const width = _pad * 2 + 6 * (_w + _gapX);
 
         final pos = <String, Offset>{};
         byCol.forEach((col, list) {
@@ -66,13 +66,13 @@ class GraphScreen extends StatelessWidget {
             ]),
           ),
           if (nodes.length <= 1)
-            const Expanded(
+            Expanded(
               child: Padding(
-                padding: EdgeInsets.fromLTRB(24, 8, 24, 48),
+                padding: const EdgeInsets.fromLTRB(24, 8, 24, 48),
                 child: Center(
                   child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: 460),
-                    child: EmptyState(
+                    constraints: const BoxConstraints(maxWidth: 460),
+                    child: const EmptyState(
                       icon: Icons.hub_outlined,
                       title: 'The graph is empty',
                       body: 'Only this profile exists so far. Confirm a record and its paragraphs, '

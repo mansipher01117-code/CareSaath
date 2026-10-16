@@ -223,7 +223,7 @@ class ErrorState extends StatelessWidget {
             const Icon(Icons.cloud_off_rounded, color: C.rose),
             const SizedBox(width: 12),
             Expanded(child: Text(message, style: const TextStyle(color: C.rose, fontWeight: FontWeight.w600))),
-            TextButton(onPressed: refreshAll, child: const Text('Retry')),
+            const TextButton(onPressed: refreshAll, child: Text('Retry')),
           ]),
         ),
       );

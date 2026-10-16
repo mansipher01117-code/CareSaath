@@ -87,7 +87,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                 ),
               ),
               const SizedBox(height: 10),
-              Row(children: const [
+              const Row(children: [
                 Icon(Icons.upload_file_outlined, size: 16, color: C.muted),
                 SizedBox(width: 6),
                 Text('PDF / photo upload with OCR — coming next', style: TextStyle(color: C.muted, fontSize: 13)),

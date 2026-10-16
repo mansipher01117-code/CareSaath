@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 
 import '../profiles.dart';
 import '../theme.dart';
-import '../widgets/common.dart';
 
 /// Create a family member. Name + relation are required; the caregiver is the
 /// person who usually handles their appointments.
