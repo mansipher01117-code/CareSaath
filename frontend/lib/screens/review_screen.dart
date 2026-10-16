@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
 /// Human review: original text on one side, suggested facts on the other.
+/// Items are free text — rename or fix anything before it becomes evidence.
 /// Only checked facts are written to the graph on Confirm.
 class ReviewScreen extends StatefulWidget {
   final Json draft;
@@ -15,17 +17,39 @@ class ReviewScreen extends StatefulWidget {
 
 class _ReviewScreenState extends State<ReviewScreen> {
   late final List<Json> spans = (widget.draft['spans'] as List).cast<Json>();
-  late final List<Json> facts = (widget.draft['facts'] as List).map((f) => Map<String, dynamic>.from(f as Map)).toList();
+  late final List<Json> facts =
+      (widget.draft['facts'] as List).map((f) => Map<String, dynamic>.from(f as Map)).toList();
   late final List<bool> keep = List.filled(facts.length, true, growable: true);
+  late final List<TextEditingController> labels = [
+    for (final f in facts) TextEditingController(text: '${f['label'] ?? ''}')
+  ];
   bool _busy = false;
   String? _highlight;
 
-  static const items = {'lab_report': 'Existing lab report', 'bp_log': 'Home BP log'};
-  static const types = {'request': 'Request', 'receipt': 'Receipt', 'appointment': 'Appointment', 'absence_note': 'Note only'};
+  static const types = {
+    'request': 'Request',
+    'receipt': 'Receipt',
+    'appointment': 'Appointment',
+    'absence_note': 'Note only',
+  };
+
+  @override
+  void dispose() {
+    for (final c in labels) {
+      c.dispose();
+    }
+    super.dispose();
+  }
 
   void _addFact() {
     setState(() {
-      facts.add({'type': 'receipt', 'item': 'lab_report', 'label': items['lab_report'], 'span_id': spans.first['id'], 'date': widget.draft['date'] ?? ''});
+      facts.add({
+        'type': 'request',
+        'label': '',
+        'span_id': spans.first['id'],
+        'date': widget.draft['date'] ?? '',
+      });
+      labels.add(TextEditingController());
       keep.add(true);
     });
   }
@@ -33,8 +57,16 @@ class _ReviewScreenState extends State<ReviewScreen> {
   Future<void> _confirm() async {
     setState(() => _busy = true);
     try {
-      final chosen = [for (var i = 0; i < facts.length; i++) if (keep[i]) facts[i]];
-      final res = await Api.confirm(widget.draft['id'], chosen);
+      final chosen = <Json>[];
+      for (var i = 0; i < facts.length; i++) {
+        if (!keep[i]) continue;
+        final f = Map<String, dynamic>.from(facts[i]);
+        final label = labels[i].text.trim();
+        if ((f['type'] == 'request' || f['type'] == 'receipt') && label.isEmpty) continue;
+        if (label.isNotEmpty) f['label'] = label;
+        chosen.add(f);
+      }
+      final res = await Api.confirm(profiles.selectedId!, widget.draft['id'], chosen);
       refreshAll();
       if (!mounted) return;
       await _showResult(res['change'] as Json? ?? {});
@@ -47,7 +79,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
   }
 
   Future<void> _discard() async {
-    await Api.discard(widget.draft['id']);
+    await Api.discard(profiles.selectedId!, widget.draft['id']);
     if (mounted) Navigator.of(context).pop(false);
   }
 
@@ -70,6 +102,15 @@ class _ReviewScreenState extends State<ReviewScreen> {
         actions: [FilledButton(onPressed: () => Navigator.pop(context), child: const Text('Done'))],
       ),
     );
+  }
+
+  int get _keptCount {
+    var n = 0;
+    for (var i = 0; i < facts.length; i++) {
+      final needsLabel = facts[i]['type'] == 'request' || facts[i]['type'] == 'receipt';
+      if (keep[i] && (!needsLabel || labels[i].text.trim().isNotEmpty)) n++;
+    }
+    return n;
   }
 
   @override
@@ -117,7 +158,11 @@ class _ReviewScreenState extends State<ReviewScreen> {
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('Check before it becomes evidence', style: Theme.of(context).textTheme.headlineMedium),
               const SizedBox(height: 4),
-              const Text('Uncheck anything wrong. Only checked facts are written to FalkorDB.', style: TextStyle(color: C.muted)),
+              const Text(
+                'Rename an item, point it at a different paragraph, or uncheck it. '
+                'Only checked facts are written to FalkorDB — and two items with the same name are the same item.',
+                style: TextStyle(color: C.muted, height: 1.5),
+              ),
               const SizedBox(height: 22),
               wide
                   ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -133,7 +178,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
                 FilledButton.icon(
                   onPressed: _busy ? null : _confirm,
                   icon: const Icon(Icons.verified_outlined),
-                  label: Text(_busy ? 'Saving…' : 'Confirm ${keep.where((k) => k).length} fact(s)'),
+                  label: Text(_busy ? 'Saving…' : 'Confirm $_keptCount fact(s)'),
                 ),
               ]),
             ]),
@@ -171,15 +216,16 @@ class _ReviewScreenState extends State<ReviewScreen> {
             ]),
             if (hasItem)
               Padding(
-                padding: const EdgeInsets.only(left: 48),
-                child: DropdownButton<String>(
-                  value: items.containsKey(f['item']) ? f['item'] : 'lab_report',
-                  isExpanded: true,
-                  items: [for (final e in items.entries) DropdownMenuItem(value: e.key, child: Text(e.value))],
-                  onChanged: (v) => setState(() {
-                    f['item'] = v;
-                    f['label'] = items[v];
-                  }),
+                padding: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
+                child: TextField(
+                  controller: labels[i],
+                  onChanged: (_) => setState(() {}),
+                  decoration: const InputDecoration(
+                    isDense: true,
+                    labelText: 'Item',
+                    hintText: 'e.g. Home BP log',
+                    helperText: 'Rename it to whatever you call it at home.',
+                  ),
                 ),
               ),
             if (type == 'appointment')

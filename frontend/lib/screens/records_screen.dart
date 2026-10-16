@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
@@ -16,8 +17,10 @@ class RecordsScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pid = profiles.selectedId;
+    if (pid == null) return const SizedBox.shrink();
     return Loader<List<dynamic>>(
-      load: Api.records,
+      load: () => Api.records(pid),
       builder: (context, recs) {
         final docs = recs.cast<Json>().reversed.toList(); // newest first
         return ListView(
@@ -27,12 +30,21 @@ class RecordsScreen extends StatelessWidget {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 820),
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text('Health timeline', style: Theme.of(context).textTheme.headlineMedium),
+                  Text('${profiles.selectedName}’s timeline',
+                      style: Theme.of(context).textTheme.headlineMedium),
                   const SizedBox(height: 4),
-                  Text('${docs.length} confirmed records · drafts awaiting review are not shown or used',
+                  Text(
+                      docs.isEmpty
+                          ? 'Drafts awaiting review are never shown or used in answers.'
+                          : '${docs.length} confirmed ${docs.length == 1 ? 'record' : 'records'} · drafts awaiting review are not shown or used',
                       style: const TextStyle(color: C.muted)),
                   const SizedBox(height: 24),
-                  if (docs.isEmpty) const Panel(child: Text('No records yet.')),
+                  if (docs.isEmpty)
+                    const EmptyState(
+                      icon: Icons.history_edu_outlined,
+                      title: 'No records yet',
+                      body: 'Add a visit note, a prescription or a front-desk slip. Each paragraph becomes a citable source.',
+                    ),
                   for (var i = 0; i < docs.length; i++) _TimelineEntry(doc: docs[i], last: i == docs.length - 1),
                 ]),
               ),
