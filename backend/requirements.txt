@@ -1,0 +1,6 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+falkordb>=1.0
+pydantic>=2.6
+# Optional: embedded FalkorDB when Docker isn't available (Linux/macOS)
+# falkordblite>=0.10
