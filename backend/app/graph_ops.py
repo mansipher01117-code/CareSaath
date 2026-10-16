@@ -158,6 +158,17 @@ def item_of(fact: dict) -> tuple[str, str]:
     return key, (label or key)
 
 
+def appointment_of(fact: dict) -> tuple[str, str]:
+    """(date, time) for a reviewed appointment fact.
+
+    Both are required: the extractor only ever reads them together, so a fact
+    carrying one of them arrived by some other route (an older client, or a
+    fact whose type was changed on the Review screen) and is not an
+    appointment.
+    """
+    return (fact.get("date") or "").strip(), (fact.get("time") or "").strip()
+
+
 def confirm_document(pid, doc_id, facts):
     before = preparation_snapshot(pid)
     for f in facts:
@@ -196,7 +207,10 @@ def confirm_document(pid, doc_id, facts):
                  "rid": f"{fid}@{f['span_id']}", "date": f.get("date", "")},
             )
         elif t == "appointment":
-            aid = f"appt:{f.get('date')}:{f.get('time')}"
+            date, time = appointment_of(f)
+            if not (date and time):
+                continue  # half an appointment is not an appointment
+            aid = f"appt:{date}:{time}"
             q(
                 pid,
                 """
@@ -206,8 +220,7 @@ def confirm_document(pid, doc_id, facts):
                 MERGE (p)-[:HAS_APPOINTMENT]->(a)
                 MERGE (s)-[:CONFIRMS]->(a)
                 """,
-                {"pid": pid, "sid": f["span_id"], "aid": aid,
-                 "date": f.get("date", ""), "time": f.get("time", "")},
+                {"pid": pid, "sid": f["span_id"], "aid": aid, "date": date, "time": time},
             )
         # absence_note: informational, stays only in the source text
 

@@ -23,6 +23,8 @@ class _ReviewScreenState extends State<ReviewScreen> {
   late final List<TextEditingController> labels = [
     for (final f in facts) TextEditingController(text: '${f['label'] ?? ''}')
   ];
+  /// Item name parked per fact while its type is not an item-bearing one.
+  final Map<int, String> _itemNames = {};
   bool _busy = false;
   String? _highlight;
 
@@ -32,6 +34,56 @@ class _ReviewScreenState extends State<ReviewScreen> {
     'appointment': 'Appointment',
     'absence_note': 'Note only',
   };
+
+  /// Types whose fact is a tracked follow-up item, i.e. carries an item name.
+  static bool _hasItem(String? type) => type == 'request' || type == 'receipt';
+
+  /// An appointment is only real once it has both a date and a time; the
+  /// extractor supplies them together, and nothing else can invent them.
+  static bool _appointmentReady(Json f) =>
+      '${f['date'] ?? ''}'.trim().isNotEmpty && '${f['time'] ?? ''}'.trim().isNotEmpty;
+
+  /// Why this fact cannot be written yet, or null when it can be.
+  String? _blocker(int i) {
+    final f = facts[i];
+    if (_hasItem(f['type'] as String?) && labels[i].text.trim().isEmpty) {
+      return 'Name this item before it can be saved.';
+    }
+    if (f['type'] == 'appointment' && !_appointmentReady(f)) {
+      return 'No date and time were read from this paragraph, so it cannot be saved as an '
+          'appointment.';
+    }
+    return null;
+  }
+
+  /// Switching a fact's type must not carry the old type's fields across: a
+  /// label like "Appointment" is not an item name, and a request has no time,
+  /// so inheriting them silently writes junk into the graph.
+  void _changeType(int i, String? newType) {
+    if (newType == null) return;
+    final f = facts[i];
+    final oldType = f['type'] as String?;
+    final next = <String, dynamic>{'type': newType, 'span_id': f['span_id']};
+
+    // An item name is only meaningful between the two item-bearing types, so
+    // it is parked rather than inherited — a detour through another type and
+    // back keeps what the reviewer typed, without ever adopting that type's
+    // own label as an item name.
+    if (_hasItem(oldType)) _itemNames[i] = labels[i].text;
+    if (_hasItem(newType)) {
+      if (!_hasItem(oldType)) labels[i].text = _itemNames[i] ?? '';
+    } else {
+      next['label'] = _hasItem(oldType) ? labels[i].text.trim() : f['label'];
+    }
+    if (newType == 'receipt') next['date'] = widget.draft['date'] ?? '';
+    if (newType == 'appointment' && oldType == 'appointment') {
+      next['date'] = f['date'];
+      next['time'] = f['time'];
+    }
+    if (newType == 'absence_note' && f['items'] != null) next['items'] = f['items'];
+
+    setState(() => facts[i] = next);
+  }
 
   @override
   void dispose() {
@@ -43,12 +95,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
 
   void _addFact() {
     setState(() {
-      facts.add({
-        'type': 'request',
-        'label': '',
-        'span_id': spans.first['id'],
-        'date': widget.draft['date'] ?? '',
-      });
+      facts.add({'type': 'request', 'span_id': spans.first['id']});
       labels.add(TextEditingController());
       keep.add(true);
     });
@@ -59,10 +106,9 @@ class _ReviewScreenState extends State<ReviewScreen> {
     try {
       final chosen = <Json>[];
       for (var i = 0; i < facts.length; i++) {
-        if (!keep[i]) continue;
+        if (!keep[i] || _blocker(i) != null) continue;
         final f = Map<String, dynamic>.from(facts[i]);
         final label = labels[i].text.trim();
-        if ((f['type'] == 'request' || f['type'] == 'receipt') && label.isEmpty) continue;
         if (label.isNotEmpty) f['label'] = label;
         chosen.add(f);
       }
@@ -107,8 +153,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
   int get _keptCount {
     var n = 0;
     for (var i = 0; i < facts.length; i++) {
-      final needsLabel = facts[i]['type'] == 'request' || facts[i]['type'] == 'receipt';
-      if (keep[i] && (!needsLabel || labels[i].text.trim().isNotEmpty)) n++;
+      if (keep[i] && _blocker(i) == null) n++;
     }
     return n;
   }
@@ -191,7 +236,8 @@ class _ReviewScreenState extends State<ReviewScreen> {
   Widget _factCard(int i) {
     final f = facts[i];
     final type = f['type'] as String;
-    final hasItem = type == 'request' || type == 'receipt';
+    final hasItem = _hasItem(type);
+    final blocker = _blocker(i);
     return MouseRegion(
       onEnter: (_) => setState(() => _highlight = f['span_id']),
       onExit: (_) => setState(() => _highlight = null),
@@ -209,7 +255,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
                   isExpanded: true,
                   underline: const SizedBox(),
                   items: [for (final e in types.entries) DropdownMenuItem(value: e.key, child: Text(e.value, style: const TextStyle(fontWeight: FontWeight.w700)))],
-                  onChanged: (v) => setState(() => f['type'] = v),
+                  onChanged: (v) => _changeType(i, v),
                 ),
               ),
               SourceChip(spanId: f['span_id'], docId: widget.draft['id']),
@@ -228,7 +274,7 @@ class _ReviewScreenState extends State<ReviewScreen> {
                   ),
                 ),
               ),
-            if (type == 'appointment')
+            if (type == 'appointment' && _appointmentReady(f))
               Padding(padding: const EdgeInsets.only(left: 48), child: Text('${f['date']} · ${f['time']}')),
             if (type == 'receipt')
               Padding(padding: const EdgeInsets.only(left: 48, top: 4), child: Text('Receipt date: ${f['date'] ?? ''}', style: const TextStyle(color: C.muted))),
@@ -237,6 +283,18 @@ class _ReviewScreenState extends State<ReviewScreen> {
                 padding: const EdgeInsets.only(left: 48),
                 child: Text('${f['label'] ?? ''} — kept as source text, no status change',
                     style: const TextStyle(color: C.muted, fontSize: 13)),
+              ),
+            if (keep[i] && blocker != null)
+              Padding(
+                padding: const EdgeInsets.only(left: 48, top: 6),
+                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  const Icon(Icons.info_outline_rounded, size: 15, color: C.rose),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(blocker,
+                        style: const TextStyle(color: C.rose, fontSize: 13, height: 1.4)),
+                  ),
+                ]),
               ),
             if (spans.length > 1)
               Padding(

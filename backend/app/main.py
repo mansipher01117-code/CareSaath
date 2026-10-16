@@ -138,6 +138,28 @@ def preview(rec: RecordIn, pid: str = Pid):
     return _preview(pid, rec)
 
 
+FACT_TYPES = ("request", "receipt", "appointment", "absence_note")
+
+
+def _validate_fact(f: dict):
+    """A reviewed fact must carry the fields its own type needs.
+
+    Changing a fact's type on the Review screen used to leave the previous
+    type's fields behind — an appointment relabelled as a receipt arrived with
+    no item name, a request relabelled as an appointment with no time — and
+    each of those wrote a nameless follow-up or an empty appointment into the
+    graph. The client now rebuilds the fact on every type change; this is the
+    guarantee that nothing else can.
+    """
+    t = f.get("type")
+    if t not in FACT_TYPES:
+        raise HTTPException(400, f"Unknown fact type {t!r}")
+    if t in ("request", "receipt") and not g.item_of(f)[0]:
+        raise HTTPException(400, f"A {t} fact needs an item name")
+    if t == "appointment" and not all(g.appointment_of(f)):
+        raise HTTPException(400, "An appointment fact needs both a date and a time")
+
+
 @app.post("/records/{doc_id}/confirm")
 def confirm(doc_id: str, body: ConfirmIn, pid: str = Pid):
     d = g.get_document(pid, doc_id)
@@ -149,6 +171,7 @@ def confirm(doc_id: str, body: ConfirmIn, pid: str = Pid):
     for f in body.facts:
         if f.get("span_id") not in span_ids:
             raise HTTPException(400, f"Fact cites unknown span {f.get('span_id')}")
+        _validate_fact(f)
     change = g.confirm_document(pid, doc_id, body.facts)
     return {"confirmed": doc_id, "change": change}
 
