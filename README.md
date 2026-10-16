@@ -5,8 +5,11 @@ Multilingual family health-record companion. Reviewed records are connected in
 appointment?"* with a source for every claim — and when a new record arrives,
 **only the related item updates** while everything else stays (and says so).
 
-> Synthetic demo · all records are fictional (Arun, caregiver Meera).
+One app, many family members: each profile keeps its own records, follow-ups and
+graph.
+
 > Not a diagnostic tool — it only explains what the records say.
+> There is no sign-in: anyone who can reach the API can read every profile in it.
 
 Track: **01 — Agents That Act on Connected Data** (graph queries as agent tools,
 explainable results). Restart persistence also covers Track 02.
@@ -35,11 +38,11 @@ python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\act
 pip install -r requirements.txt
 uvicorn app.main:app --reload --port 8000
 ```
-First start seeds D01–D03 automatically. Check http://localhost:8000/health and
-http://localhost:8000/docs.
+Nothing is seeded — the app starts empty and you create the first profile in the
+UI. Check http://localhost:8000/health and http://localhost:8000/docs.
 
 No Docker? `pip install falkordblite` and run with `FALKORDB_EMBEDDED=1`
-(Linux/macOS).
+(Linux/macOS only — `redislite` does not build on Windows).
 
 **3. Flutter app**
 ```bash
@@ -55,17 +58,38 @@ flutter run -d emulator-5554 --dart-define=API_URL=http://10.0.2.2:8000
 and add `android:usesCleartextTraffic="true"` to the `<application>` tag in
 `android/app/src/main/AndroidManifest.xml` (local http only).
 
-## Demo script (≈90 s)
+## Using it
 
-1. **Today** — appointment 20 Oct 10:00 AM (source D03). Both items *Receipt not documented*.
-2. **Ask** → "What should I clarify before the appointment?" → answer + sources + agent trace.
-3. **Add record** → *Fill demo record* (D04, 15 Oct front-desk note) → **Extract & review**.
-4. Review screen: original paragraph left, suggested fact right → **Confirm**.
-5. Dialog + **What changed** card: *Lab report: not documented → documented*, *BP log: unchanged*.
-6. **Ask** (हिंदी toggle) → "Latest record se kya badla?"
-7. **Graph** tab → live nodes/edges; tap a span to open the original.
-8. Restart backend + `docker compose restart` → state is still there.
-9. Add D04 again → *already confirmed, no duplicate facts*.
+1. **Add the first family member** — name, relation, optional caregiver. The
+   selected profile is remembered in browser/device storage, and the switcher in
+   the shell moves between profiles.
+2. **Add record** — paste a visit note, a front-desk slip, anything. Leave a
+   blank line between paragraphs; each paragraph becomes a citable source.
+3. **Review** — the extractor suggests facts. Rename an item, point it at a
+   different paragraph, or uncheck it. Only what you confirm reaches the graph.
+4. **Today** — the appointment and every follow-up, each with the evidence
+   behind its status and the graph path that derived it.
+5. **Ask** — questions in English or Hindi/Hinglish, answered only from that
+   person's confirmed records, with sources and the agent's tool trace.
+6. **Graph** — that person's live subgraph; tap a document or span for the
+   original text.
+
+## Profiles and isolation
+
+Each profile gets **its own FalkorDB graph**, `person_<id>`, and a small registry
+graph (`caresaath_people`) holds just the list of profiles. Every record endpoint
+requires a `person_id` and only ever opens that person's graph, so a query
+written for one family member cannot reach another's records — including the
+agent's tools, which are bound to one person before they run.
+
+## Follow-up items
+
+Items are not a fixed list. The extractor reads any *"please bring / bring /
+carry X"* request and any *"X was received"* receipt out of the text and
+normalizes X into a key (`existing lab report` → `existing_lab_report`). The
+review step is where that guess gets corrected: the item name is a free-text
+field, and two items whose names normalize to the same key are the same
+follow-up — so renaming is also how you merge.
 
 ## Graph model
 
@@ -83,10 +107,16 @@ never stored as a bare flag. The main query is `PREP_CYPHER` in
 
 ## API
 
+Every path below except `/health` and `/people` takes a `person_id` query
+parameter, and returns 404 if no such profile exists.
+
 | Method | Path | Purpose |
 |---|---|---|
 | GET | /health | API + graph status |
-| GET | /person | profile + appointments |
+| POST | /people | create a profile `{name, relation, caregiver?}` |
+| GET | /people | all profiles with their record counts |
+| GET | /people/{id} | one profile + appointments |
+| DELETE | /people/{id} | delete the profile and drop its graph |
 | GET | /records, /records/{id} | timeline, original source with spans |
 | POST | /records/preview | draft + suggested facts (not used in answers) |
 | POST | /records/{id}/confirm | write reviewed facts → graph, returns change diff |
@@ -95,7 +125,6 @@ never stored as a bare flag. The main query is `PREP_CYPHER` in
 | GET | /changes/latest | last change (changed / unchanged / added) |
 | GET | /graph | subgraph for the graph view |
 | POST | /ask | agent answer `{answer, sources, trace}` (lang: en/hi) |
-| POST | /demo/reset | wipe + reseed D01–D03 |
 
 ## Where to add features next
 
@@ -106,12 +135,15 @@ never stored as a bare flag. The main query is `PREP_CYPHER` in
 | Better extraction | replace `extractor.extract()` (keep the returned shape) |
 | More languages (bn, mr, ta, te) | add to `T` in `agent.py` + `_langs` in `ask_screen.dart` (or Sarvam translate) |
 | Voice | Sarvam STT/TTS in Ask screen |
-| MCP | expose `agent.TOOLS` as MCP tools |
-| Auth / multiple families | one FalkorDB graph per family (`FALKORDB_GRAPH`) + login |
+| MCP | expose `agent.tools_for(pid)` as MCP tools |
+| Auth | a login in front of the profile picker; the per-person graph split is already there |
 
-## Honest limitations (v0.1)
+## Honest limitations (v0.2)
 
-- Extraction is rule-based (keywords for lab report / BP log / appointment). Human review is the safety net.
+- Extraction is rule-based: it reads request/receipt phrasings out of the text,
+  so it will over- and under-match. Human review is the safety net.
 - Agent routing and answer text are deterministic templates; no LLM yet.
 - English + Hindi/Hinglish answers only; UI chrome is English.
-- Text entry only; no file upload yet. No auth — local synthetic demo only, don't put real health data in it.
+- Text entry only; no file upload yet.
+- **No auth.** Every profile on the server is visible to anyone who can reach
+  the API — run it locally, and think before putting real health data in it.

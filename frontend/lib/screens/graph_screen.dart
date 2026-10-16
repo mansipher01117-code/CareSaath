@@ -3,10 +3,12 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
-/// Live view of Arun's subgraph in FalkorDB, laid out in columns by node type.
+/// Live view of the selected person's own subgraph in FalkorDB, laid out in
+/// columns by node type.
 class GraphScreen extends StatelessWidget {
   const GraphScreen({super.key});
 
@@ -15,8 +17,10 @@ class GraphScreen extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final pid = profiles.selectedId;
+    if (pid == null) return const SizedBox.shrink();
     return Loader<Json>(
-      load: Api.graph,
+      load: () => Api.graph(pid),
       builder: (context, g) {
         final nodes = (g['nodes'] as List).cast<Json>();
         final edges = (g['edges'] as List).cast<Json>();
@@ -45,8 +49,10 @@ class GraphScreen extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.fromLTRB(24, 24, 24, 8),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Context graph', style: Theme.of(context).textTheme.headlineMedium),
-              Text('${nodes.length} nodes · ${edges.length} relationships · live from FalkorDB. Tap a document or span to open the source.',
+              Text('${profiles.selectedName}’s context graph',
+                  style: Theme.of(context).textTheme.headlineMedium),
+              Text('${nodes.length} nodes · ${edges.length} relationships · live from person_$pid. '
+                  'Tap a document or span to open the source.',
                   style: const TextStyle(color: C.muted)),
               const SizedBox(height: 12),
               Wrap(spacing: 14, runSpacing: 6, children: [
@@ -59,6 +65,24 @@ class GraphScreen extends StatelessWidget {
               ]),
             ]),
           ),
+          if (nodes.length <= 1)
+            const Expanded(
+              child: Padding(
+                padding: EdgeInsets.fromLTRB(24, 8, 24, 48),
+                child: Center(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(maxWidth: 460),
+                    child: EmptyState(
+                      icon: Icons.hub_outlined,
+                      title: 'The graph is empty',
+                      body: 'Only this profile exists so far. Confirm a record and its paragraphs, '
+                          'follow-ups and receipts appear here as connected nodes.',
+                    ),
+                  ),
+                ),
+              ),
+            )
+          else
           Expanded(
             child: InteractiveViewer(
               constrained: false,

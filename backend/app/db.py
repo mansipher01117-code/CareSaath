@@ -1,13 +1,27 @@
 """FalkorDB connection.
 
+Data is isolated per person: every profile gets its own graph named
+``person_<id>``. A small registry graph (``REGISTRY_GRAPH``) holds the list of
+profiles so the app can show a picker before any person is selected.
+
 By default connects to a FalkorDB server (docker compose). Set
 FALKORDB_EMBEDDED=1 to use the embedded falkordblite engine instead
 (handy when Docker isn't available).
 """
 import os
+import re
 from functools import lru_cache
 
-GRAPH_NAME = os.getenv("FALKORDB_GRAPH", "caresaath")
+REGISTRY_GRAPH = os.getenv("FALKORDB_REGISTRY_GRAPH", "caresaath_people")
+
+_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def graph_name(person_id: str) -> str:
+    """Graph that holds one person's records. Isolated from every other person."""
+    if not _ID_RE.match(person_id or ""):
+        raise ValueError(f"Invalid person id: {person_id!r}")
+    return f"person_{person_id}"
 
 
 @lru_cache(maxsize=1)
@@ -27,18 +41,25 @@ def _client():
     )
 
 
-def graph():
-    return _client().select_graph(GRAPH_NAME)
+def graph(name: str):
+    return _client().select_graph(name)
 
 
-def query(cypher: str, params: dict | None = None):
-    """Run a Cypher query and return rows as list of dicts."""
-    res = graph().query(cypher, params or {})
+def query(cypher: str, params: dict | None = None, *, name: str = REGISTRY_GRAPH):
+    """Run a Cypher query against graph `name` and return rows as list of dicts."""
+    res = graph(name).query(cypher, params or {})
     header = [h[1] if isinstance(h, (list, tuple)) else h for h in (res.header or [])]
     out = []
     for row in res.result_set or []:
         out.append({header[i]: _plain(v) for i, v in enumerate(row)})
     return out
+
+
+def drop_graph(name: str):
+    try:
+        graph(name).delete()
+    except Exception:
+        pass  # nothing stored for this person yet
 
 
 def _plain(v):
