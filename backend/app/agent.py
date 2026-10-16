@@ -1,9 +1,12 @@
 """CareSaath agent (v1: deterministic router over graph tools).
 
-The agent picks graph tools based on the question, runs them against
-FalkorDB, and composes an answer ONLY from what the tools returned.
-Every answer carries its sources and a trace of tool calls, so the path
-behind the answer is visible.
+The agent picks graph tools based on the question, runs them against the
+selected person's graph in FalkorDB, and composes an answer ONLY from what the
+tools returned. Every answer carries its sources and a trace of tool calls, so
+the path behind the answer is visible.
+
+Nothing here knows the name of any particular follow-up item: a question is
+matched against the items that actually exist in that person's graph.
 
 Upgrade path: replace `route()` with an LLM that chooses tools (function
 calling / MCP) and replace `compose()` with an LLM that writes the answer
@@ -11,41 +14,65 @@ from the returned evidence. Keep `validate_sources()` so the model can never
 cite something the graph didn't return.
 """
 from . import graph_ops as g
+from .extractor import tokens
 
 # ---------------- tools (names match the 03 — Tool Contract doc) ----------------
 
-def retrieve_patient_context():
-    return {"person": g.person(), "appointments": g.appointments()}
+def tools_for(pid: str) -> dict:
+    """Bind the graph tools to one person, so no tool can read another's data."""
+    return {
+        "retrieve_patient_context": lambda: {
+            "person": g.person(pid), "appointments": g.appointments(pid)
+        },
+        "list_unresolved_followups": lambda: g.preparation(pid),
+        "latest_change": lambda: g.latest_change(pid),
+    }
 
-
-def list_unresolved_followups():
-    return g.preparation()
-
-
-def latest_change():
-    return g.latest_change()
-
-
-TOOLS = {
-    "retrieve_patient_context": retrieve_patient_context,
-    "list_unresolved_followups": list_unresolved_followups,
-    "latest_change": latest_change,
-}
 
 # ---------------- routing ----------------
 
+CHANGE_WORDS = ["change", "changed", "badla", "बदला", "latest", "new record", "naya"]
+APPT_WORDS = ["appointment", "kab", "कब", "अपॉइंटमेंट", "visit"]
+PREP_WORDS = ["clarify", "prepare", "pending", "bring", "lana"]
+
+# Words that say what kind of question this is, not which item it is about.
+STOPWORDS = {
+    "what", "when", "where", "which", "who", "whom", "how", "why", "should",
+    "could", "would", "will", "shall", "do", "does", "did", "is", "are", "was",
+    "were", "be", "been", "am", "the", "an", "and", "or", "but", "to", "for",
+    "of", "at", "in", "on", "by", "with", "from", "about", "before", "after",
+    "my", "our", "your", "his", "her", "their", "its", "me", "you", "we", "us",
+    "it", "they", "them", "him", "she", "he", "need", "needs", "needed", "get",
+    "got", "have", "has", "had", "any", "all", "still", "yet", "now", "already",
+    "receive", "received", "receipt", "receipts", "documented", "document",
+    "bring", "carry", "pending", "clarify", "prepare", "preparation", "ready",
+    "appointment", "visit", "doctor", "clinic", "record", "records", "latest",
+    "new", "change", "changed", "status", "update", "tell", "show", "know",
+    # Hinglish / Hindi
+    "kya", "hai", "hain", "ka", "ki", "ke", "ko", "se", "mein", "hua", "hui",
+    "nahi", "kab", "kaise", "kaun", "kahan", "mujhe", "humein", "hume", "apna",
+    "apne", "liye", "kar", "karna", "karni", "kiya", "laana", "lana", "chahiye",
+    "batao", "bataiye", "wala", "sab", "kuch", "koi", "mila", "mil",
+    "क्या", "है", "हैं", "का", "की", "के", "को", "से", "में", "नहीं", "कब",
+    "कैसे", "कौन", "कहाँ", "मुझे", "हमें", "लिए", "चाहिए", "सब",
+}
+
+
 def route(q: str) -> tuple[str, list[str]]:
     low = q.lower()
-    if any(w in low for w in ["change", "changed", "badla", "बदला", "latest", "new record", "naya"]):
+    if any(w in low for w in CHANGE_WORDS):
         return "changes", ["latest_change", "list_unresolved_followups"]
-    if any(w in low for w in ["appointment", "kab", "कब", "अपॉइंटमेंट", "visit"]) and not any(
-        w in low for w in ["clarify", "prepare", "pending", "bring", "lana"]):
+    if any(w in low for w in APPT_WORDS) and not any(w in low for w in PREP_WORDS):
         return "appointment", ["retrieve_patient_context"]
-    if "lab" in low or "लैब" in q:
-        return "item:lab_report", ["list_unresolved_followups"]
-    if "bp" in low or "बीपी" in q or "blood pressure" in low:
-        return "item:bp_log", ["list_unresolved_followups"]
     return "preparation", ["retrieve_patient_context", "list_unresolved_followups"]
+
+
+def match_items(question: str, items: list[dict]) -> list[dict]:
+    """Follow-ups this question names, by overlap with their own words."""
+    asked = tokens(question) - STOPWORDS
+    if not asked:
+        return []
+    return [i for i in items if (tokens(i.get("label") or "") | tokens(i.get("item") or "")) & asked]
 
 
 # ---------------- answer text ----------------
@@ -59,6 +86,7 @@ T = {
         "no_appt": "No confirmed appointment found in the records.",
         "clarify": "You may want to clarify before the appointment: {items}.",
         "all_done": "All requested items have documented receipts.",
+        "no_items": "No follow-up items are being tracked yet.",
         "no_change": "No record has been confirmed yet.",
         "changed_hdr": "After {doc} ({date}) was confirmed:",
         "changed": "{label} changed: {frm} → {to}.",
@@ -77,6 +105,7 @@ T = {
         "no_appt": "Records mein koi confirmed appointment nahi mila.",
         "clarify": "Appointment se pehle ye clarify kar sakte hain: {items}.",
         "all_done": "Saare requested items ki receipt documented hai.",
+        "no_items": "Abhi koi follow-up item track nahi ho raha.",
         "no_change": "Abhi tak koi record confirm nahi hua.",
         "changed_hdr": "{doc} ({date}) confirm hone ke baad:",
         "changed": "{label} badla: {frm} → {to}.",
@@ -94,7 +123,7 @@ def _src(span_id, doc_id):
     return {"span_id": span_id, "doc_id": doc_id}
 
 
-def compose(intent, results, lang):
+def compose(intent, results, lang, items=None):
     t = T.get(lang, T["en"])
     lines, sources = [], []
 
@@ -126,12 +155,10 @@ def compose(intent, results, lang):
                 sources.append(_src(s["span_id"], s["doc_id"]))
         return lines, sources
 
-    items = results["list_unresolved_followups"]
-    if intent.startswith("item:"):
-        key = intent.split(":", 1)[1]
-        items = [i for i in items if i["item"] == key]
-        if not items:
-            return [t["nothing"]], []
+    if items is None:
+        items = results["list_unresolved_followups"]
+    if not items:
+        return [t["nothing"] if intent == "item" else t["no_items"]], []
 
     pending = []
     for i in items:
@@ -171,23 +198,32 @@ def validate_sources(sources, results):
     return out
 
 
-def ask(question: str, lang: str = "en"):
+def ask(pid: str, question: str, lang: str = "en"):
+    tools = tools_for(pid)
     intent, tool_names = route(question)
     results, trace = {}, []
     for name in tool_names:
-        results[name] = TOOLS[name]()
+        results[name] = tools[name]()
         trace.append({"tool": name, "returned": _summarize(results[name])})
-    lines, sources = compose(intent, results, lang)
+
+    items = None
+    if intent == "preparation":
+        matched = match_items(question, results["list_unresolved_followups"])
+        if matched:
+            intent, items = "item", matched
+
+    lines, sources = compose(intent, results, lang, items)
     sources = validate_sources(sources, results)
     # attach source text for the UI
     for s in sources:
-        doc = g.get_document(s["doc_id"])
+        doc = g.get_document(pid, s["doc_id"])
         span = next((x for x in (doc or {}).get("spans", []) if x["id"] == s["span_id"]), None)
         s["text"] = span["text"] if span else ""
         s["doc_title"] = doc["title"] if doc else ""
         s["date"] = doc["date"] if doc else ""
     return {"question": question, "lang": lang, "intent": intent, "answer": lines,
-            "sources": sources, "trace": trace}
+            "sources": sources, "trace": trace,
+            "matched_items": [i["id"] for i in items] if items else []}
 
 
 def _summarize(v):

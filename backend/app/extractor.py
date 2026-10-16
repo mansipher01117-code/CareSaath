@@ -1,28 +1,140 @@
 """Rule-based extractor (v1).
 
 Turns a record's text into *draft* facts for human review. Nothing here is
-written to the graph — the user reviews/edits on the Review screen and only
-confirmed facts are stored.
+written to the graph — the user reviews/edits/renames on the Review screen and
+only confirmed facts are stored.
+
+Nothing is hardcoded to a particular item: any "please bring / bring / carry X"
+request and any "X was received" receipt produces a follow-up whose key is
+normalized from X itself.
 
 Later you can swap `extract()` for an LLM/OCR-based extractor that returns
 the same shape.
 """
 import re
+import unicodedata
 
-# item_key -> (display label, keywords)
-ITEMS = {
-    "lab_report": ("Existing lab report", ["lab report", "lab-report", "लैब रिपोर्ट"]),
-    "bp_log": ("Home BP log", ["bp log", "blood pressure log", "bp-log", "बीपी लॉग"]),
+MAX_KEY_LEN = 60
+MAX_OBJECT_LEN = 90
+
+# "bring / carry / collect X" — the verb carries the request on its own.
+REQUEST_RE = re.compile(
+    r"\b(?:bring|carry|collect|fetch)\b\s+(?:along\s+)?(?P<obj>[^.;!?\n]+)", re.I
+)
+# "please share / send / submit X" — only a request when asked politely, so
+# ordinary narration ("the clinic sent a reminder") isn't mistaken for one.
+POLITE_REQUEST_RE = re.compile(
+    r"\bplease\s+(?:also\s+)?(?:share|send|submit|provide|attach|upload|keep)\b\s+(?P<obj>[^.;!?\n]+)",
+    re.I,
+)
+# Hindi / Hinglish puts the object before the verb. Devanagari verbs end in a
+# combining mark, which is not a word character, so they take no trailing \b.
+HI_REQUEST_RE = re.compile(
+    r"(?P<obj>[^.;!?\n।]{2,90}?)\s*(?:लेकर\s+आएं|साथ\s+लाएं|लेकर\s+आना|लाएं|लाना)"
+)
+HINGLISH_REQUEST_RE = re.compile(
+    r"(?P<obj>[^.;!?\n]{2,90}?)\s+(?:laakar\s+aayein|laana|lana)\b", re.I
+)
+
+# "X was received / submitted / handed over"
+RECEIPT_RE = re.compile(
+    r"(?P<obj>[^.;!?\n]{2,90}?)\s+(?:was|were|has\s+been|have\s+been|is|are)\s+"
+    r"(?:received|submitted|collected|handed\s+over|handed\s+in|dropped\s+off|delivered)\b",
+    re.I,
+)
+# "we received X" / "the clinic received X"
+ACTIVE_RECEIPT_RE = re.compile(
+    r"\b(?:received|collected|accepted)\b\s+(?P<obj>[^.;!?\n]+)", re.I
+)
+HI_RECEIPT_RE = re.compile(
+    r"(?P<obj>[^.;!?\n।]{2,90}?)\s*(?:मिल\s+(?:गई|गया|गये|गयी)|प्राप्त\s+(?:हुआ|हुई|हुए))"
+)
+HINGLISH_RECEIPT_RE = re.compile(
+    r"(?P<obj>[^.;!?\n]{2,90}?)\s+(?:mil\s+(?:gaya|gayi|gai|gaye)|receive\s+ho\s+gay\w+)\b", re.I
+)
+
+# "No receipt of X is documented" — informational, never a status change.
+ABSENCE_RE = re.compile(
+    r"\bno\s+(?:documented\s+)?(?:receipts?|record|acknowledg\w*)\s+(?:of|for)\s+"
+    r"(?P<obj>[^.;!?\n]+?)(?:\s+(?:is|are|was|were|has|have)\b|[.;!?\n]|$)",
+    re.I,
+)
+
+NEGATION_RE = re.compile(r"\b(?:no|not|never|nahi|without)\b|नहीं", re.I)
+
+# Where an object ends: "bring the lab report >to the next appointment<".
+TRAIL_RE = re.compile(
+    r"\s+(?:to|at|for|with|when|before|after|during|on|in|by|next|so|if|from"
+    r"|today|yesterday|tomorrow|now|already|recently|again|also|please)\b.*$",
+    re.I,
+)
+# Leading scene-setting: "On 15 October, the lab report was received".
+LEAD_RE = re.compile(r"^(?:on|at|in|during|per|as\s+per|according\s+to)\b[^,]*,\s*", re.I)
+SPLIT_RE = re.compile(r"\s*(?:,|;|&|\band\b|\bor\b|\bplus\b|और|तथा|या)\s*", re.I)
+DETERMINERS = {
+    "the", "a", "an", "his", "her", "their", "your", "my", "our", "its",
+    "any", "all", "both", "that", "this", "these", "those", "same",
 }
-
-REQUEST_WORDS = ["bring", "carry", "please share", "lana", "laana", "लाएं", "लाना", "request"]
-RECEIPT_WORDS = ["received", "was received", "submitted", "mil gaya", "मिल गई", "प्राप्त"]
-NEGATION_WORDS = ["no ", "not ", "nahi", "नहीं", "without"]
+# A phrase made only of these is not an item worth tracking.
+NOT_AN_ITEM = {
+    "it", "them", "him", "he", "she", "they", "we", "you", "i", "us", "me",
+    "one", "ones", "thing", "things", "something", "anything", "everything",
+    "patient", "report", "reports",
+}
 
 MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
 APPT_RE = re.compile(
     rf"(\d{{1,2}})\s+({MONTHS})[^.\n]*?(\d{{1,2}}(?::\d{{2}})?\s*(?:AM|PM|am|pm))", re.I
 )
+
+STRIP_CHARS = " \t\"'“”‘’()[]:-–—"
+
+
+def normalize_key(phrase: str) -> str:
+    """'The existing lab report ' -> 'existing_lab_report'. This is also the
+    rename key: two labels that normalize the same are the same follow-up."""
+    # Keep combining marks, or Devanagari words would shatter into fragments.
+    kept = "".join(
+        ch if (ch.isalnum() or unicodedata.category(ch) in ("Mn", "Mc")) else " "
+        for ch in (phrase or "").lower()
+    )
+    words = kept.split()
+    while words and words[0] in DETERMINERS:
+        words.pop(0)
+    return "_".join(words)[:MAX_KEY_LEN].strip("_")
+
+
+def tokens(phrase: str) -> set[str]:
+    """Content words of a phrase, for matching a question against item names."""
+    return {w for w in normalize_key(phrase).split("_") if len(w) > 1}
+
+
+def clean_phrase(phrase: str) -> str:
+    """Trim an extracted object down to the item itself, keeping its own words."""
+    p = LEAD_RE.sub("", (phrase or "").strip())
+    p = TRAIL_RE.sub("", p).strip(STRIP_CHARS)
+    words = p.split()
+    while words and words[0].lower() in DETERMINERS:
+        words.pop(0)
+    return " ".join(words)[:MAX_OBJECT_LEN].strip()
+
+
+def label_for(phrase: str) -> str:
+    p = clean_phrase(phrase)
+    return p[:1].upper() + p[1:] if p else p
+
+
+def items_from(obj: str) -> list[tuple[str, str]]:
+    """Split a captured object into (key, label) pairs."""
+    out, seen = [], set()
+    for part in SPLIT_RE.split(obj or ""):
+        label = label_for(part)
+        key = normalize_key(label)
+        if not key or key in seen or key in NOT_AN_ITEM or len(key) < 2:
+            continue
+        seen.add(key)
+        out.append((key, label))
+    return out
 
 
 def split_paragraphs(text: str) -> list[str]:
@@ -30,43 +142,63 @@ def split_paragraphs(text: str) -> list[str]:
     return parts or [text.strip()]
 
 
-def _items_in(p: str) -> list[str]:
-    low = p.lower()
-    return [k for k, (_, kws) in ITEMS.items() if any(kw in low for kw in kws)]
+def _first_match(paragraph: str, *regexes) -> str | None:
+    for rx in regexes:
+        m = rx.search(paragraph)
+        if m:
+            return m.group("obj")
+    return None
 
 
 def extract(doc_id: str, text: str, record_date: str) -> dict:
     paragraphs = split_paragraphs(text)
-    spans = []
-    facts = []
+    spans, facts = [], []
     for i, p in enumerate(paragraphs, start=1):
         span_id = f"{doc_id}-P{i}"
         spans.append({"id": span_id, "index": i, "text": p})
-        low = p.lower()
-        items = _items_in(p)
-        negated = any(w in f" {low} " for w in NEGATION_WORDS)
 
-        if items and any(w in low for w in REQUEST_WORDS) and not negated:
-            for it in items:
-                facts.append({"type": "request", "item": it, "label": ITEMS[it][0], "span_id": span_id})
-        elif items and any(w in low for w in RECEIPT_WORDS) and not negated:
-            for it in items:
+        absence = ABSENCE_RE.search(p)
+        if absence:
+            found = items_from(absence.group("obj"))
+            if found:
                 facts.append({
-                    "type": "receipt", "item": it, "label": ITEMS[it][0],
-                    "span_id": span_id, "date": record_date,
+                    "type": "absence_note", "span_id": span_id,
+                    "items": [k for k, _ in found],
+                    "label": "Receipt not documented: " + ", ".join(l for _, l in found),
                 })
-        elif items and negated:
-            # e.g. "No receipt of the lab report is documented" -> informational only
-            facts.append({
-                "type": "absence_note", "items": items, "span_id": span_id,
-                "label": "Receipt not documented in this record",
-            })
+        else:
+            negated = bool(NEGATION_RE.search(p))
+            receipt_obj = _first_match(
+                p, RECEIPT_RE, HI_RECEIPT_RE, HINGLISH_RECEIPT_RE, ACTIVE_RECEIPT_RE
+            )
+            if receipt_obj and not negated:
+                for key, label in items_from(receipt_obj):
+                    facts.append({
+                        "type": "receipt", "item": key, "label": label,
+                        "span_id": span_id, "date": record_date,
+                    })
+            request_obj = _first_match(
+                p, POLITE_REQUEST_RE, REQUEST_RE, HI_REQUEST_RE, HINGLISH_REQUEST_RE
+            )
+            if request_obj and not negated:
+                for key, label in items_from(request_obj):
+                    facts.append({
+                        "type": "request", "item": key, "label": label, "span_id": span_id,
+                    })
 
         m = APPT_RE.search(p)
-        if m and ("appointment" in low or "अपॉइंटमेंट" in p):
+        if m and ("appointment" in p.lower() or "अपॉइंटमेंट" in p):
             facts.append({
                 "type": "appointment", "span_id": span_id,
                 "date": f"{m.group(1)} {m.group(2).title()}", "time": m.group(3).upper(),
                 "label": "Appointment",
             })
-    return {"spans": spans, "facts": facts, "extractor": "rule-based-v1"}
+
+    seen, unique = set(), []
+    for f in facts:
+        k = (f["type"], f.get("item"), f["span_id"])
+        if k in seen:
+            continue
+        seen.add(k)
+        unique.append(f)
+    return {"spans": spans, "facts": unique, "extractor": "rule-based-v1"}

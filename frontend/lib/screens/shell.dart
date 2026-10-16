@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 import 'add_record_screen.dart';
 import 'ask_screen.dart';
+import 'create_profile_screen.dart';
 import 'graph_screen.dart';
+import 'profiles_screen.dart';
 import 'records_screen.dart';
 import 'today_screen.dart';
 
@@ -31,6 +34,7 @@ class _ShellState extends State<Shell> {
   Future<void> addRecord() async {
     await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AddRecordScreen()));
     refreshAll();
+    profiles.refreshCounts();
   }
 
   @override
@@ -53,7 +57,9 @@ class _ShellState extends State<Shell> {
             padding: const EdgeInsets.fromLTRB(16, 28, 16, 20),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               const _Brand(),
-              const SizedBox(height: 32),
+              const SizedBox(height: 20),
+              const ProfileSwitcher(),
+              const SizedBox(height: 20),
               for (var i = 0; i < _dest.length; i++)
                 _RailItem(
                   icon: index == i ? _dest[i].$2 : _dest[i].$1,
@@ -76,7 +82,10 @@ class _ShellState extends State<Shell> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const _Brand(), actions: const [_HealthDot(), SizedBox(width: 12)]),
+      appBar: AppBar(
+        title: const _Brand(),
+        actions: const [ProfileSwitcher(compact: true), SizedBox(width: 8)],
+      ),
       body: body,
       floatingActionButton: index <= 1
           ? FloatingActionButton.extended(
@@ -98,6 +107,95 @@ class _ShellState extends State<Shell> {
       ),
     );
   }
+}
+
+/// Who the app is currently showing, and a menu to switch or add someone.
+class ProfileSwitcher extends StatelessWidget {
+  final bool compact;
+  const ProfileSwitcher({super.key, this.compact = false});
+
+  Future<void> _handle(BuildContext context, String value) async {
+    if (value == '__add') {
+      await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const CreateProfileScreen()));
+    } else if (value == '__manage') {
+      await Navigator.of(context)
+          .push(MaterialPageRoute(builder: (_) => const ProfilesScreen(popOnSelect: true)));
+    } else {
+      await profiles.select(value);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+        animation: profiles,
+        builder: (context, _) {
+          final name = profiles.selectedName;
+          final relation = (profiles.selected?['relation'] ?? '').toString();
+          return PopupMenuButton<String>(
+            tooltip: 'Switch profile',
+            color: C.card,
+            position: PopupMenuPosition.under,
+            onSelected: (v) => _handle(context, v),
+            itemBuilder: (_) => [
+              for (final p in profiles.people)
+                PopupMenuItem(
+                  value: p['id'] as String,
+                  child: Row(children: [
+                    Avatar(name: (p['name'] ?? '?').toString(), selected: p['id'] == profiles.selectedId, radius: 14),
+                    const SizedBox(width: 10),
+                    Expanded(child: Text('${p['name']}', style: const TextStyle(fontWeight: FontWeight.w600))),
+                    if (p['id'] == profiles.selectedId)
+                      const Icon(Icons.check_rounded, size: 16, color: C.teal),
+                  ]),
+                ),
+              const PopupMenuDivider(),
+              const PopupMenuItem(
+                value: '__add',
+                child: Row(children: [
+                  Icon(Icons.person_add_alt_rounded, size: 18, color: C.muted),
+                  SizedBox(width: 10),
+                  Text('Add a family member'),
+                ]),
+              ),
+              const PopupMenuItem(
+                value: '__manage',
+                child: Row(children: [
+                  Icon(Icons.group_outlined, size: 18, color: C.muted),
+                  SizedBox(width: 10),
+                  Text('All profiles'),
+                ]),
+              ),
+            ],
+            child: Container(
+              padding: EdgeInsets.symmetric(horizontal: compact ? 8 : 10, vertical: 8),
+              decoration: BoxDecoration(
+                color: C.card,
+                border: Border.all(color: C.line),
+                borderRadius: BorderRadius.circular(compact ? 99 : 14),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Avatar(name: name, selected: true, radius: 14),
+                const SizedBox(width: 9),
+                if (!compact)
+                  Expanded(
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+                      Text(name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14)),
+                      if (relation.isNotEmpty)
+                        Text(relation, style: const TextStyle(color: C.muted, fontSize: 11.5)),
+                    ]),
+                  )
+                else
+                  Text(name, style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 13.5)),
+                const SizedBox(width: 4),
+                const Icon(Icons.expand_more_rounded, size: 18, color: C.muted),
+              ]),
+            ),
+          );
+        },
+      );
 }
 
 class _Brand extends StatelessWidget {

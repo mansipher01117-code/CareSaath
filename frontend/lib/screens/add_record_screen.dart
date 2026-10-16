@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
-import '../widgets/common.dart';
 import 'review_screen.dart';
 
 class AddRecordScreen extends StatefulWidget {
@@ -21,19 +21,6 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   String get _iso =>
       '${_date.year.toString().padLeft(4, '0')}-${_date.month.toString().padLeft(2, '0')}-${_date.day.toString().padLeft(2, '0')}';
 
-  Future<void> _fillDemo() async {
-    try {
-      final d = await Api.nextDemoRecord();
-      setState(() {
-        _title.text = d['title'];
-        _text.text = d['text'];
-        _date = DateTime.parse(d['date']);
-      });
-    } catch (e) {
-      setState(() => _error = '$e');
-    }
-  }
-
   Future<void> _submit() async {
     if (_title.text.trim().isEmpty || _text.text.trim().length < 3) {
       setState(() => _error = 'Add a title and the record text.');
@@ -44,7 +31,8 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       _error = null;
     });
     try {
-      final draft = await Api.preview(_title.text.trim(), _iso, _text.text.trim());
+      final draft = await Api.preview(
+          profiles.selectedId!, _title.text.trim(), _iso, _text.text.trim());
       if (!mounted) return;
       if (draft['duplicate_of'] != null) {
         setState(() => _error = 'This record is already confirmed as ${draft['duplicate_of']}. No duplicate facts were created.');
@@ -68,21 +56,11 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 720),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('New health record', style: Theme.of(context).textTheme.headlineMedium),
+              Text('New record for ${profiles.selectedName}',
+                  style: Theme.of(context).textTheme.headlineMedium),
               const SizedBox(height: 4),
-              const Text('Nothing is used in answers until you review and confirm it.', style: TextStyle(color: C.muted)),
-              const SizedBox(height: 20),
-              Panel(
-                color: C.marigoldSoft,
-                border: C.marigold.withValues(alpha: 0.25),
-                padding: const EdgeInsets.all(14),
-                child: Row(children: [
-                  const Icon(Icons.auto_awesome_outlined, color: C.marigold),
-                  const SizedBox(width: 12),
-                  const Expanded(child: Text('Demo: load the fictional 15 October front-desk note (D04).')),
-                  TextButton(onPressed: _fillDemo, child: const Text('Fill demo record')),
-                ]),
-              ),
+              const Text('Nothing is used in answers until you review and confirm it.',
+                  style: TextStyle(color: C.muted)),
               const SizedBox(height: 20),
               TextField(controller: _title, decoration: const InputDecoration(labelText: 'Title', hintText: 'e.g. Clinic visit note')),
               const SizedBox(height: 14),
@@ -109,7 +87,7 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                 ),
               ),
               const SizedBox(height: 10),
-              Row(children: const [
+              const Row(children: [
                 Icon(Icons.upload_file_outlined, size: 16, color: C.muted),
                 SizedBox(width: 6),
                 Text('PDF / photo upload with OCR — coming next', style: TextStyle(color: C.muted, fontSize: 13)),

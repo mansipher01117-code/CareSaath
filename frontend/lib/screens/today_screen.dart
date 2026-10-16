@@ -1,20 +1,25 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
+import 'profiles_screen.dart';
 
 class TodayScreen extends StatelessWidget {
   final VoidCallback onAsk;
   final VoidCallback onAdd;
   const TodayScreen({super.key, required this.onAsk, required this.onAdd});
 
-  Future<List<Json>> _load() => Future.wait([Api.person(), Api.preparation(), Api.latestChange()]);
+  Future<List<Json>> _load(String pid) =>
+      Future.wait([Api.person(pid), Api.preparation(pid), Api.latestChange(pid)]);
 
   @override
   Widget build(BuildContext context) {
+    final pid = profiles.selectedId;
+    if (pid == null) return const SizedBox.shrink();
     return Loader<List<Json>>(
-      load: _load,
+      load: () => _load(pid),
       builder: (context, d) {
         final person = d[0];
         final prep = d[1];
@@ -25,21 +30,39 @@ class TodayScreen extends StatelessWidget {
         final wide = MediaQuery.sizeOf(context).width >= 1100;
 
         final left = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          _Header(person: person, pending: pending, total: items.length),
+          _Header(person: person),
           const SizedBox(height: 20),
-          if (appts.isNotEmpty) _AppointmentCard(appt: appts.first),
+          if (appts.isNotEmpty)
+            _AppointmentCard(appt: appts.first)
+          else
+            const EmptyState(
+              icon: Icons.event_busy_outlined,
+              title: 'No appointment on record',
+              body: 'When a record says an appointment is confirmed, it shows up here with its source.',
+            ),
           const SizedBox(height: 28),
           Row(children: [
             Text('Appointment preparation', style: Theme.of(context).textTheme.titleLarge),
             const Spacer(),
-            Text('$pending to clarify', style: const TextStyle(color: C.marigold, fontWeight: FontWeight.w700)),
+            if (items.isNotEmpty)
+              Text('$pending to clarify', style: const TextStyle(color: C.marigold, fontWeight: FontWeight.w700)),
           ]),
           const SizedBox(height: 4),
           const Text('Status is derived by following graph links to receipt evidence — never guessed.',
               style: TextStyle(color: C.muted, fontSize: 13)),
           const SizedBox(height: 14),
           if (items.isEmpty)
-            const Panel(child: Text('No requested items yet. Add a visit note to get started.'))
+            EmptyState(
+              icon: Icons.checklist_rounded,
+              title: 'Nothing to follow up yet',
+              body: 'Add a visit note that asks you to bring something, and it will be tracked here '
+                  'until a record shows it was received.',
+              action: FilledButton.icon(
+                onPressed: onAdd,
+                icon: const Icon(Icons.add_rounded),
+                label: const Text('Add a record'),
+              ),
+            )
           else
             for (final i in items) ...[_PrepItem(item: i), const SizedBox(height: 12)],
         ]);
@@ -47,9 +70,7 @@ class TodayScreen extends StatelessWidget {
         final right = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           if (change.isNotEmpty) _ChangeCard(change: change),
           if (change.isNotEmpty) const SizedBox(height: 16),
-          _AskCard(onAsk: onAsk),
-          const SizedBox(height: 16),
-          _DemoCard(onAdd: onAdd),
+          _AskCard(onAsk: onAsk, name: (person['name'] ?? '').toString()),
         ]);
 
         return SingleChildScrollView(
@@ -72,33 +93,45 @@ class TodayScreen extends StatelessWidget {
   }
 }
 
+/// A recognisable icon for whatever the item turned out to be.
+IconData itemIcon(String key) {
+  final k = key.toLowerCase();
+  bool has(List<String> words) => words.any(k.contains);
+  if (has(['bp', 'pressure', 'sugar', 'glucose', 'ecg', 'pulse'])) return Icons.monitor_heart_outlined;
+  if (has(['card', 'insurance', 'policy', 'aadhaar', 'id'])) return Icons.badge_outlined;
+  if (has(['x_ray', 'xray', 'scan', 'mri', 'ct', 'ultrasound', 'sonography'])) return Icons.image_outlined;
+  if (has(['prescription', 'medicine', 'medication', 'tablet', 'dose'])) return Icons.medication_outlined;
+  if (has(['lab', 'blood', 'test', 'profile', 'thyroid', 'report'])) return Icons.science_outlined;
+  return Icons.description_outlined;
+}
+
 class _Header extends StatelessWidget {
   final Json person;
-  final int pending;
-  final int total;
-  const _Header({required this.person, required this.pending, required this.total});
+  const _Header({required this.person});
 
   @override
-  Widget build(BuildContext context) => Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const SyntheticBadge(),
-        const SizedBox(height: 18),
-        Row(children: [
-          CircleAvatar(
-            radius: 26,
-            backgroundColor: C.marigoldSoft,
-            child: Text((person['name'] ?? 'A').toString()[0],
-                style: const TextStyle(fontSize: 22, fontWeight: FontWeight.w800, color: C.marigold)),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text("${person['name']}'s care", style: Theme.of(context).textTheme.headlineLarge),
-              Text('${person['relation']} · caregiver ${person['caregiver']} · ${person['records']} confirmed records',
-                  style: const TextStyle(color: C.muted)),
-            ]),
+  Widget build(BuildContext context) {
+    final name = (person['name'] ?? '').toString();
+    final caregiver = (person['caregiver'] ?? '').toString();
+    final records = person['records'] ?? 0;
+    return Row(children: [
+      Avatar(name: name, radius: 26),
+      const SizedBox(width: 14),
+      Expanded(
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('$name’s care', style: Theme.of(context).textTheme.headlineLarge),
+          Text(
+            [
+              person['relation'] ?? '',
+              if (caregiver.isNotEmpty) 'caregiver $caregiver',
+              '$records confirmed ${records == 1 ? 'record' : 'records'}',
+            ].join(' · '),
+            style: const TextStyle(color: C.muted),
           ),
         ]),
-      ]);
+      ),
+    ]);
+  }
 }
 
 class _AppointmentCard extends StatelessWidget {
@@ -156,8 +189,7 @@ class _PrepItem extends StatelessWidget {
             width: 40,
             height: 40,
             decoration: BoxDecoration(color: ok ? C.tealSoft : C.marigoldSoft, borderRadius: BorderRadius.circular(12)),
-            child: Icon(item['item'] == 'bp_log' ? Icons.monitor_heart_outlined : Icons.science_outlined,
-                color: ok ? C.teal : C.marigold),
+            child: Icon(itemIcon('${item['item']}'), color: ok ? C.teal : C.marigold),
           ),
           const SizedBox(width: 14),
           Expanded(child: Text(item['label'], style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w700))),
@@ -204,7 +236,7 @@ class _EvidenceLine extends StatelessWidget {
       );
 }
 
-/// "What changed" — the signature demo moment: what moved, what stayed.
+/// "What changed" after the last confirmed record: what moved, what stayed.
 class _ChangeCard extends StatelessWidget {
   final Json change;
   const _ChangeCard({required this.change});
@@ -234,7 +266,7 @@ class _ChangeCard extends StatelessWidget {
               ])),
         for (final c in added)
           _row(Icons.add_circle_rounded, C.plum, c['label'],
-              Text('Now tracked', style: const TextStyle(color: C.plum, fontWeight: FontWeight.w700, fontSize: 13))),
+              const Text('Now tracked', style: TextStyle(color: C.plum, fontWeight: FontWeight.w700, fontSize: 13))),
         for (final c in unchanged)
           _row(Icons.pause_circle_outline_rounded, C.muted, c['label'],
               Text('Unchanged · ${_s(c['status'])}', style: const TextStyle(color: C.muted, fontSize: 13))),
@@ -257,42 +289,18 @@ class _ChangeCard extends StatelessWidget {
 
 class _AskCard extends StatelessWidget {
   final VoidCallback onAsk;
-  const _AskCard({required this.onAsk});
+  final String name;
+  const _AskCard({required this.onAsk, required this.name});
   @override
   Widget build(BuildContext context) => Panel(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const Eyebrow('Ask CareSaath'),
           const SizedBox(height: 6),
           Text('Questions in your language, answers with sources.', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 6),
+          Text('Only $name’s confirmed records are used.', style: const TextStyle(color: C.muted, fontSize: 13)),
           const SizedBox(height: 14),
           OutlinedButton.icon(onPressed: onAsk, icon: const Icon(Icons.forum_outlined), label: const Text('Open Ask')),
-        ]),
-      );
-}
-
-class _DemoCard extends StatelessWidget {
-  final VoidCallback onAdd;
-  const _DemoCard({required this.onAdd});
-  @override
-  Widget build(BuildContext context) => Panel(
-        color: C.marigoldSoft,
-        border: C.marigold.withValues(alpha: 0.25),
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          const Eyebrow('Demo script', color: C.marigold),
-          const SizedBox(height: 8),
-          const Text('1. Both items show “not documented”.\n2. Add record → “Fill demo record (D04)”.\n3. Review and confirm.\n4. Only the lab report changes; BP log stays.',
-              style: TextStyle(height: 1.6)),
-          const SizedBox(height: 14),
-          Wrap(spacing: 10, runSpacing: 10, children: [
-            FilledButton.icon(onPressed: onAdd, icon: const Icon(Icons.add_rounded), label: const Text('Add record')),
-            OutlinedButton(
-              onPressed: () async {
-                await Api.resetDemo();
-                refreshAll();
-              },
-              child: const Text('Reset demo data'),
-            ),
-          ]),
         ]),
       );
 }

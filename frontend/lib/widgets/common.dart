@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 
 /// White rounded panel used everywhere.
@@ -133,8 +134,11 @@ Color nodeColor(String type) {
   }
 }
 
-/// Bottom sheet showing the original record with the cited paragraph highlighted.
+/// Bottom sheet showing the original record with the cited paragraph
+/// highlighted. Always reads from the profile currently selected.
 Future<void> showSource(BuildContext context, String docId, String spanId) {
+  final pid = profiles.selectedId;
+  if (pid == null) return Future.value();
   return showModalBottomSheet(
     context: context,
     isScrollControlled: true,
@@ -145,7 +149,7 @@ Future<void> showSource(BuildContext context, String docId, String spanId) {
       initialChildSize: 0.6,
       maxChildSize: 0.92,
       builder: (ctx, scroll) => FutureBuilder<Json>(
-        future: Api.record(docId),
+        future: Api.record(pid, docId),
         builder: (ctx, snap) {
           if (snap.hasError) return Center(child: Text('${snap.error}'));
           if (!snap.hasData) return const Center(child: CircularProgressIndicator());
@@ -219,22 +223,46 @@ class ErrorState extends StatelessWidget {
             const Icon(Icons.cloud_off_rounded, color: C.rose),
             const SizedBox(width: 12),
             Expanded(child: Text(message, style: const TextStyle(color: C.rose, fontWeight: FontWeight.w600))),
-            TextButton(onPressed: refreshAll, child: const Text('Retry')),
+            const TextButton(onPressed: refreshAll, child: Text('Retry')),
           ]),
         ),
       );
 }
 
-class SyntheticBadge extends StatelessWidget {
-  const SyntheticBadge({super.key});
+/// Shown wherever there is genuinely nothing yet — no records, no follow-ups,
+/// no appointment, no profiles.
+class EmptyState extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final String body;
+  final Widget? action;
+  const EmptyState({
+    super.key,
+    required this.icon,
+    required this.title,
+    required this.body,
+    this.action,
+  });
+
   @override
-  Widget build(BuildContext context) => Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        decoration: BoxDecoration(border: Border.all(color: C.line), borderRadius: BorderRadius.circular(99), color: C.card),
-        child: const Row(mainAxisSize: MainAxisSize.min, children: [
-          Icon(Icons.science_outlined, size: 14, color: C.muted),
-          SizedBox(width: 5),
-          Text('Synthetic demo · fictional records', style: TextStyle(fontSize: 12, color: C.muted, fontWeight: FontWeight.w600)),
+  Widget build(BuildContext context) => Panel(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 30),
+        child: Column(children: [
+          Container(
+            width: 52,
+            height: 52,
+            decoration: BoxDecoration(color: C.paper, borderRadius: BorderRadius.circular(16)),
+            child: Icon(icon, color: C.muted, size: 24),
+          ),
+          const SizedBox(height: 14),
+          Text(title,
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16.5, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 6),
+          Text(body,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: C.muted, fontSize: 13.5, height: 1.5)),
+          if (action != null) ...[const SizedBox(height: 18), action!],
         ]),
       );
 }

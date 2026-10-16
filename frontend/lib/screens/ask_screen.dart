@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../api.dart';
+import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
@@ -19,8 +20,8 @@ class _AskScreenState extends State<AskScreen> {
 
   static const _langs = {'en': 'English', 'hi': 'हिंदी / Hinglish'};
   static const _suggest = {
-    'en': ['What should I clarify before the appointment?', 'Was the lab report received?', 'What changed after the latest record?', 'When is the appointment?'],
-    'hi': ['Appointment se pehle kya clarify karna hai?', 'Lab report receive hui?', 'Latest record se kya badla?', 'Appointment kab hai?'],
+    'en': ['What should I clarify before the appointment?', 'What changed after the latest record?', 'When is the appointment?'],
+    'hi': ['Appointment se pehle kya clarify karna hai?', 'Latest record se kya badla?', 'Appointment kab hai?'],
   };
 
   Future<void> _ask(String q) async {
@@ -31,7 +32,7 @@ class _AskScreenState extends State<AskScreen> {
     });
     _q.clear();
     try {
-      final res = await Api.ask(q.trim(), _lang);
+      final res = await Api.ask(profiles.selectedId!, q.trim(), _lang);
       setState(() => _turns.add({'role': 'agent', ...res}));
     } catch (e) {
       setState(() => _turns.add({'role': 'error', 'text': '$e'}));
@@ -53,7 +54,10 @@ class _AskScreenState extends State<AskScreen> {
           Padding(
             padding: const EdgeInsets.fromLTRB(18, 24, 18, 8),
             child: Row(children: [
-              Expanded(child: Text('Ask about Arun’s records', style: Theme.of(context).textTheme.headlineMedium)),
+              Expanded(
+                child: Text('Ask about ${profiles.selectedName}’s records',
+                    style: Theme.of(context).textTheme.headlineMedium),
+              ),
               SegmentedButton<String>(
                 segments: [for (final e in _langs.entries) ButtonSegment(value: e.key, label: Text(e.value, style: const TextStyle(fontSize: 12)))],
                 selected: {_lang},
@@ -69,8 +73,10 @@ class _AskScreenState extends State<AskScreen> {
               children: [
                 if (_turns.isEmpty) ...[
                   const SizedBox(height: 20),
-                  const Text('Answers come only from confirmed records in the graph, with a source for every claim.',
-                      style: TextStyle(color: C.muted)),
+                  Text(
+                      'Answers come only from ${profiles.selectedName}’s confirmed records in the graph, '
+                      'with a source for every claim.',
+                      style: const TextStyle(color: C.muted)),
                   const SizedBox(height: 16),
                 ],
                 for (final t in _turns) _bubble(t),
