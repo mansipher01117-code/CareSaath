@@ -2,8 +2,17 @@
 
 The agent picks graph tools based on the question, runs them against the
 selected person's graph in FalkorDB, and composes an answer ONLY from what the
-tools returned. Every answer carries its sources and a trace of tool calls, so
-the path behind the answer is visible.
+tools returned. An answer is a list of claims, and each claim carries the
+evidence behind *that* claim plus a trace of tool calls, so the path behind
+every line is visible:
+
+    {"text": "Knee physio referral: receipt is documented (...).",
+     "sources": [{"span_id": "R09-P1", "doc_id": "R09", "text": "..."}]}
+
+A claim that rests on the *absence* of a record ("receipt is not documented")
+carries no sources, because no span in the graph says it. `sources` at the top
+level is the deduped union of the claims' own sources, in the order the claims
+make them.
 
 Nothing here knows the name of any particular follow-up item: a question is
 matched against the items that actually exist in that person's graph.
@@ -123,79 +132,130 @@ def _src(span_id, doc_id):
     return {"span_id": span_id, "doc_id": doc_id}
 
 
+def _line(text, sources=()):
+    """One claim and the evidence for that claim (empty list = nothing cites it)."""
+    return {"text": text, "sources": [s for s in sources if s]}
+
+
+def _pick(candidates, doc_id=None):
+    """One source out of a follow-up's evidence, preferring a given document."""
+    usable = [c for c in candidates if c.get("span_id")]
+    if not usable:
+        return []
+    c = next((x for x in usable if x.get("doc_id") == doc_id), usable[0])
+    return [_src(c["span_id"], c["doc_id"])]
+
+
+def _status_src(item, status, doc_id=None):
+    """Evidence for a claim about a follow-up's status.
+
+    'receipt documented' is backed by the span that documents the receipt.
+    'receipt not documented' is the absence of such a span, so nothing in the
+    graph can be cited for it — the claim goes out with no sources rather than
+    borrowing someone else's span.
+    """
+    if not item or status != "receipt_documented":
+        return []
+    return _pick(item["receipts"], doc_id)
+
+
+def _appt_src(appt):
+    return _pick(appt.get("sources") or [])
+
+
 def compose(intent, results, lang, items=None):
+    """Answer as a list of claims, each with its own sources."""
     t = T.get(lang, T["en"])
-    lines, sources = [], []
+    lines = []
 
     if intent == "changes":
         ch = results["latest_change"]
         if not ch:
-            return [t["no_change"]], []
-        lines.append(t["changed_hdr"].format(doc=ch["doc_id"], date=ch["doc_date"]))
+            return [_line(t["no_change"])]
+        tracked = {i["id"]: i for i in results["list_unresolved_followups"]}
+        lines.append(_line(t["changed_hdr"].format(doc=ch["doc_id"], date=ch["doc_date"])))
         for c in ch["changed"]:
-            lines.append(t["changed"].format(label=c["label"], frm=t[c["from"]], to=t[c["to"]]))
+            lines.append(_line(
+                t["changed"].format(label=c["label"], frm=t[c["from"]], to=t[c["to"]]),
+                _status_src(tracked.get(c["id"]), c["to"], ch["doc_id"])))
         for c in ch["added"]:
-            lines.append(t["added"].format(label=c["label"], to=t[c["to"]]))
+            item = tracked.get(c["id"])
+            # A new item is tracked because this record asked for it; if the
+            # same record also documents a receipt, that is the stronger span.
+            src = _status_src(item, c["to"], ch["doc_id"]) or (
+                _pick(item["requested_by"], ch["doc_id"]) if item else [])
+            lines.append(_line(t["added"].format(label=c["label"], to=t[c["to"]]), src))
         for c in ch["unchanged"]:
-            lines.append(t["unchanged"].format(label=c["label"], st=t[c["status"]]))
-        for item in results["list_unresolved_followups"]:
-            for r in item["receipts"]:
-                if r["doc_id"] == ch["doc_id"]:
-                    sources.append(_src(r["span_id"], r["doc_id"]))
-        return lines, sources
+            lines.append(_line(
+                t["unchanged"].format(label=c["label"], st=t[c["status"]]),
+                _status_src(tracked.get(c["id"]), c["status"])))
+        return lines
 
     if intent == "appointment":
         appts = results["retrieve_patient_context"]["appointments"]
         if not appts:
-            return [t["no_appt"]], []
+            return [_line(t["no_appt"])]
         for a in appts:
-            s = next((x for x in a["sources"] if x.get("span_id")), None)
-            lines.append(t["appt"].format(date=a["date"], time=a["time"], doc=s["doc_id"] if s else "?"))
-            if s:
-                sources.append(_src(s["span_id"], s["doc_id"]))
-        return lines, sources
+            src = _appt_src(a)
+            doc = src[0]["doc_id"] if src else "?"
+            lines.append(_line(t["appt"].format(date=a["date"], time=a["time"], doc=doc), src))
+        return lines
 
     if items is None:
         items = results["list_unresolved_followups"]
     if not items:
-        return [t["nothing"] if intent == "item" else t["no_items"]], []
+        return [_line(t["nothing"] if intent == "item" else t["no_items"])]
 
     pending = []
     for i in items:
         for rq in i["requested_by"][:1]:
-            lines.append(t["requested"].format(label=i["label"], doc=rq["doc_id"], date=rq["date"]))
-            sources.append(_src(rq["span_id"], rq["doc_id"]))
+            lines.append(_line(
+                t["requested"].format(label=i["label"], doc=rq["doc_id"], date=rq["date"]),
+                [_src(rq["span_id"], rq["doc_id"])]))
         if i["receipts"]:
             r = i["receipts"][0]
-            lines.append(t["documented"].format(label=i["label"], date=r["date"], doc=r["doc_id"]))
-            sources.append(_src(r["span_id"], r["doc_id"]))
+            lines.append(_line(
+                t["documented"].format(label=i["label"], date=r["date"], doc=r["doc_id"]),
+                [_src(r["span_id"], r["doc_id"])]))
         else:
-            lines.append(t["not_documented"].format(label=i["label"]))
+            # Absence: no span says this, so the claim carries no source.
+            lines.append(_line(t["not_documented"].format(label=i["label"])))
             pending.append(i["label"])
 
     if intent == "preparation":
         ctx = results["retrieve_patient_context"]
         for a in ctx["appointments"][:1]:
-            s = next((x for x in a["sources"] if x.get("span_id")), None)
-            lines.insert(0, t["appt"].format(date=a["date"], time=a["time"], doc=s["doc_id"] if s else "?"))
-            if s:
-                sources.append(_src(s["span_id"], s["doc_id"]))
-        lines.append(t["clarify"].format(items=", ".join(pending)) if pending else t["all_done"])
+            src = _appt_src(a)
+            doc = src[0]["doc_id"] if src else "?"
+            lines.insert(0, _line(t["appt"].format(date=a["date"], time=a["time"], doc=doc), src))
+        # A summary of the claims above; the evidence sits on those claims.
+        lines.append(_line(t["clarify"].format(items=", ".join(pending)) if pending
+                           else t["all_done"]))
     if any(i["receipts"] for i in items):
-        lines.append(t["note"])
-    return lines, sources
+        lines.append(_line(t["note"]))
+    return lines
 
 
-def validate_sources(sources, results):
-    """Keep only sources that came out of tool results (guards future LLM output)."""
+def validate_sources(lines, results):
+    """Drop any source the tools did not return, and collect what is left.
+
+    Guards future LLM output: a model can never cite something the graph
+    didn't hand it. Each claim keeps its own (deduped) sources and the return
+    value is the union across claims, sharing the same dicts so hydrating a
+    source once updates it everywhere it is cited.
+    """
     blob = str(results)
-    seen, out = set(), []
-    for s in sources:
-        key = (s["span_id"], s["doc_id"])
-        if s["span_id"] in blob and key not in seen:
-            seen.add(key)
-            out.append(s)
-    return out
+    known: dict[tuple, dict] = {}
+    for line in lines:
+        kept = []
+        for s in line["sources"]:
+            if not s["span_id"] or s["span_id"] not in blob:
+                continue
+            shared = known.setdefault((s["span_id"], s["doc_id"]), s)
+            if shared not in kept:
+                kept.append(shared)
+        line["sources"] = kept
+    return list(known.values())
 
 
 def ask(pid: str, question: str, lang: str = "en"):
@@ -212,15 +272,18 @@ def ask(pid: str, question: str, lang: str = "en"):
         if matched:
             intent, items = "item", matched
 
-    lines, sources = compose(intent, results, lang, items)
-    sources = validate_sources(sources, results)
-    # attach source text for the UI
+    lines = compose(intent, results, lang, items)
+    sources = validate_sources(lines, results)
+    # attach source text for the UI (the claims share these dicts)
+    docs: dict[str, dict] = {}
     for s in sources:
-        doc = g.get_document(pid, s["doc_id"])
-        span = next((x for x in (doc or {}).get("spans", []) if x["id"] == s["span_id"]), None)
+        if s["doc_id"] not in docs:
+            docs[s["doc_id"]] = g.get_document(pid, s["doc_id"]) or {}
+        doc = docs[s["doc_id"]]
+        span = next((x for x in doc.get("spans", []) if x["id"] == s["span_id"]), None)
         s["text"] = span["text"] if span else ""
-        s["doc_title"] = doc["title"] if doc else ""
-        s["date"] = doc["date"] if doc else ""
+        s["doc_title"] = doc.get("title", "")
+        s["date"] = doc.get("date", "")
     return {"question": question, "lang": lang, "intent": intent, "answer": lines,
             "sources": sources, "trace": trace,
             "matched_items": [i["id"] for i in items] if items else []}

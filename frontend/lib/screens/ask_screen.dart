@@ -75,7 +75,7 @@ class _AskScreenState extends State<AskScreen> {
                   const SizedBox(height: 20),
                   Text(
                       'Answers come only from ${profiles.selectedName}’s confirmed records in the graph, '
-                      'with a source for every claim.',
+                      'and every claim shows the record it came from.',
                       style: const TextStyle(color: C.muted)),
                   const SizedBox(height: 16),
                 ],
@@ -143,8 +143,7 @@ class _AskScreenState extends State<AskScreen> {
     if (t['role'] == 'error') {
       return Padding(padding: const EdgeInsets.only(bottom: 12), child: ErrorState(message: t['text']));
     }
-    final lines = (t['answer'] as List).cast<String>();
-    final sources = (t['sources'] as List).cast<Json>();
+    final lines = (t['answer'] as List).cast<Json>();
     final trace = (t['trace'] as List).cast<Json>();
     return Padding(
       padding: const EdgeInsets.only(bottom: 14, right: 40),
@@ -156,25 +155,7 @@ class _AskScreenState extends State<AskScreen> {
             Eyebrow('CareSaath', color: C.teal),
           ]),
           const SizedBox(height: 10),
-          for (final l in lines)
-            Padding(padding: const EdgeInsets.only(bottom: 6), child: Text(l, style: const TextStyle(fontSize: 15, height: 1.5))),
-          if (sources.isNotEmpty) ...[
-            const SizedBox(height: 8),
-            const Eyebrow('Sources'),
-            const SizedBox(height: 8),
-            for (final s in sources)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SourceChip(spanId: s['span_id'], docId: s['doc_id']),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text('“${s['text']}”', maxLines: 2, overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: C.muted, fontSize: 13, fontStyle: FontStyle.italic)),
-                  ),
-                ]),
-              ),
-          ],
+          for (final l in lines) AnswerClaim(l),
           Theme(
             data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
             child: ExpansionTile(
@@ -200,6 +181,37 @@ class _AskScreenState extends State<AskScreen> {
           ),
         ]),
       ),
+    );
+  }
+}
+
+/// One claim of an answer, with the evidence for that claim under it. A claim
+/// that rests on the absence of a record ("receipt is not documented") has no
+/// sources, and shows none rather than borrowing the line above's.
+class AnswerClaim extends StatelessWidget {
+  final Json line;
+  const AnswerClaim(this.line, {super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final sources = ((line['sources'] ?? const []) as List).cast<Json>();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Text(line['text'], style: const TextStyle(fontSize: 15, height: 1.5)),
+        for (final s in sources)
+          Padding(
+            padding: const EdgeInsets.only(top: 6, left: 2),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              SourceChip(spanId: s['span_id'], docId: s['doc_id']),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text('“${s['text']}”', maxLines: 2, overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(color: C.muted, fontSize: 13, fontStyle: FontStyle.italic)),
+              ),
+            ]),
+          ),
+      ]),
     );
   }
 }

@@ -2,7 +2,7 @@
 
 Multilingual family health-record companion. Reviewed records are connected in
 **FalkorDB**, so the agent can answer *"what do I still need to clarify before the
-appointment?"* with a source for every claim — and when a new record arrives,
+appointment?"* with a source on every claim that has one — and when a new record arrives,
 **only the related item updates** while everything else stays (and says so).
 
 One app, many family members: each profile keeps its own records, follow-ups and
@@ -70,7 +70,10 @@ and add `android:usesCleartextTraffic="true"` to the `<application>` tag in
 4. **Today** — the appointment and every follow-up, each with the evidence
    behind its status and the graph path that derived it.
 5. **Ask** — questions in English or Hindi/Hinglish, answered only from that
-   person's confirmed records, with sources and the agent's tool trace.
+   person's confirmed records. The answer is a list of claims and each one
+   carries its own evidence, so a quote sits under the sentence it backs. A
+   claim that rests on the *absence* of a record ("receipt is not documented")
+   shows no source, because none exists. The agent's tool trace is below it.
 6. **Graph** — that person's live subgraph; tap a document or span for the
    original text.
 
@@ -124,7 +127,7 @@ parameter, and returns 404 if no such profile exists.
 | GET | /preparation | follow-ups with derived status, sources, graph path |
 | GET | /changes/latest | last change (changed / unchanged / added) |
 | GET | /graph | subgraph for the graph view |
-| POST | /ask | agent answer `{answer, sources, trace}` (lang: en/hi) |
+| POST | /ask | agent answer `{answer: [{text, sources}], sources, trace}` (lang: en/hi) |
 
 ## Where to add features next
 
