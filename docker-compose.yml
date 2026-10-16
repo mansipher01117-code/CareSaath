@@ -1,0 +1,12 @@
+services:
+  falkordb:
+    image: falkordb/falkordb:latest
+    ports:
+      - "6379:6379"   # graph (Redis protocol)
+      - "3000:3000"   # FalkorDB Browser -> http://localhost:3000
+    volumes:
+      - falkordb_data:/var/lib/falkordb/data   # persistent storage: survives restarts
+    restart: unless-stopped
+
+volumes:
+  falkordb_data:
