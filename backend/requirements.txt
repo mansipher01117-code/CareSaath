@@ -13,6 +13,3 @@ google-genai>=1.0,<3.0
 # Running the tests (no API key needed — the Gemini client is mocked).
 pytest>=8.0,<10.0
 httpx>=0.27,<1.0
-
-# Optional: embedded FalkorDB when Docker isn't available (Linux/macOS)
-# falkordblite>=0.10,<1.0

@@ -36,7 +36,29 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
+_registry_indexed = False
+
+
+def ensure_registry_index():
+    """Index the registry on the first profile write, never at startup.
+
+    Startup must not wait on the database: a slow or unreachable server would
+    otherwise take the whole API down as it boots. By the time this runs the
+    caller has already reached the server, so a failure here means the index
+    is simply there already.
+    """
+    global _registry_indexed
+    if _registry_indexed:
+        return
+    try:
+        db.query("CREATE INDEX FOR (n:Person) ON (n.id)")
+    except Exception:
+        pass  # already exists
+    _registry_indexed = True
+
+
 def create(name: str, relation: str, caregiver: str | None) -> dict:
+    ensure_registry_index()
     pid = _unique_id(name)
     db.query(
         "CREATE (p:Person {id:$id, name:$name, relation:$relation, caregiver:$caregiver, "

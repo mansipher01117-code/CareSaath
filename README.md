@@ -11,6 +11,8 @@ graph.
 > Not a diagnostic tool — it only explains what the records say.
 > There is no sign-in: anyone who can reach the API can read every profile in it.
 
+**Live demo:** _(not deployed yet — paste the frontend URL here)_
+
 Track: **01 — Agents That Act on Connected Data** (graph queries as agent tools,
 explainable results). Restart persistence also covers Track 02.
 
@@ -61,6 +63,52 @@ flutter run -d emulator-5554 --dart-define=API_URL=http://10.0.2.2:8000
 ```
 and add `android:usesCleartextTraffic="true"` to the `<application>` tag in
 `android/app/src/main/AndroidManifest.xml` (local http only).
+
+## Deploy (Vercel)
+
+Two Vercel projects from this one repo: the API as a Python function, the
+Flutter app as a static upload. No sign-in is added by deploying — see the
+warning at the top before putting real records in a public deployment.
+
+**1. Backend** — new Vercel project from this repo:
+
+- **Root Directory:** `backend`
+- **Framework Preset:** FastAPI
+- **Environment variables:**
+
+  | Name | Value |
+  |---|---|
+  | `FALKORDB_EMBEDDED` | `0` |
+  | `FALKORDB_HOST` | your FalkorDB Cloud host |
+  | `FALKORDB_PORT` | your FalkorDB Cloud port |
+  | `FALKORDB_USERNAME` | your FalkorDB Cloud username |
+  | `FALKORDB_PASSWORD` | your FalkorDB Cloud password |
+  | `GEMINI_API_KEY` | free key from <https://aistudio.google.com/apikey> (optional) |
+  | `GEMINI_MODEL` | `gemini-flash-latest` |
+  | `ALLOWED_ORIGINS` | `*` for now; the frontend URL once step 2 is done |
+
+  The embedded engine is not an option here — `FALKORDB_EMBEDDED=0` and a
+  reachable server is the only deployed configuration.
+
+- Deploy, then check `https://<backend>.vercel.app/health`. It answers even
+  when the graph does not: `"graph": "unavailable"` means the API is up and the
+  database settings are wrong or the server is asleep.
+
+**2. Frontend** — build locally, upload the output:
+
+```powershell
+.uild_web.ps1 https://<backend>.vercel.app
+```
+
+That runs `flutter build web --release --dart-define=API_URL=<url>` in
+`frontend/` and copies `frontend/vercel.json` into `frontend/build/web`. Then
+create a second Vercel project from `frontend/build/web` (`vercel deploy --prod`
+from inside that folder, or drag the folder into the Vercel dashboard). The
+API URL is compiled into the build, so re-run the script after the backend URL
+changes.
+
+**3. Lock down CORS** — set `ALLOWED_ORIGINS` on the backend project to the
+frontend's origin (e.g. `https://caresaath.vercel.app`) and redeploy.
 
 ## Using it
 
@@ -167,8 +215,9 @@ parameter, and returns 404 if no such profile exists.
   the history of each round is not kept separately.
 - English + Hindi/Hinglish answers only; UI chrome is English.
 - Text entry only; no file upload yet.
-- Connects to a local FalkorDB (server or embedded). There is no support for a
-  username or password, so a managed/cloud FalkorDB that requires credentials
-  will not connect.
+- Connects to a FalkorDB server (local or managed — `FALKORDB_USERNAME` /
+  `FALKORDB_PASSWORD` are sent when set), or to the embedded engine locally.
+  The connection is plain TCP: a cloud server that requires TLS is not
+  supported yet.
 - **No auth.** Every profile on the server is visible to anyone who can reach
   the API — run it locally, and think before putting real health data in it.

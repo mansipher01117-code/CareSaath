@@ -1,9 +1,13 @@
 .venv/
 __pycache__/
+.pytest_cache/
 backend/data/
 frontend/.dart_tool/
 frontend/build/
+.vercel/
 
-# Secrets: .env holds the Gemini key. The committed template is .env.example.
+# Secrets: .env holds the Gemini key and the FalkorDB credentials. The
+# committed template is .env.example.
 .env
+backend/.env
 !.env.example

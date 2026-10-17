@@ -5,6 +5,7 @@ graph (`person_<id>`), so one family member's records are invisible to another.
 
 Run:  uvicorn app.main:app --reload --port 8000
 """
+import os
 from typing import Annotated, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -14,9 +15,24 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 from . import agent, db, graph_ops as g, people
 from .extractor import extract
 
+
+def _allowed_origins() -> list[str]:
+    """Browser origins allowed to call the API, from ALLOWED_ORIGINS.
+
+    Comma-separated, e.g. "https://caresaath.vercel.app,http://localhost:8080".
+    Defaults to "*" so a local checkout needs no configuration; set it to the
+    deployed frontend's origin once there is one.
+    """
+    raw = os.getenv("ALLOWED_ORIGINS", "*")
+    return [o.strip() for o in raw.split(",") if o.strip()] or ["*"]
+
+
 app = FastAPI(title="CareSaath API", version="0.2.0")
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"]
+    CORSMiddleware,
+    allow_origins=_allowed_origins(),
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
@@ -104,14 +120,10 @@ def person_id(person_id: str = Query(min_length=1, max_length=64)) -> str:
 Pid = Depends(person_id)
 
 
-@app.on_event("startup")
-def startup():
-    """Prepare the registry graph only. No data is ever seeded."""
-    if db.ping():
-        try:
-            db.query("CREATE INDEX FOR (n:Person) ON (n.id)")
-        except Exception:
-            pass  # already exists
+# Startup touches nothing: the API has to come up even when the database is
+# slow, asleep or unreachable, so the registry index is created on the first
+# profile write instead (``people.create``) and the per-person indexes on the
+# first write to that person's graph. No data is ever seeded.
 
 
 # ---------------- health ----------------
