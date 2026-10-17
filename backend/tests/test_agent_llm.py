@@ -14,6 +14,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from google.genai import types  # noqa: E402
+
 from app import agent, graph_ops as g  # noqa: E402
 
 PID = "nilofer"
@@ -86,14 +88,28 @@ def call(name, **args):
 
 
 def turn(*, text=None, calls=()):
-    """One generate_content response: tool calls, or the final text."""
-    parts = [SimpleNamespace(function_call=c, text=None) for c in calls]
+    """One generate_content response: tool calls, or the final text.
+
+    The candidate content is a real ``types.Content``, because what goes back
+    to Gemini on the next turn is built from these parts — a fake that cannot
+    be put in a ``types.Content`` would hide exactly the bug below.
+    """
+    parts = [types.Part(function_call=types.FunctionCall(name=c.name, args=c.args))
+             for c in calls]
     if text is not None:
-        parts.append(SimpleNamespace(function_call=None, text=text))
+        parts.append(types.Part(text=text))
     return SimpleNamespace(
         text=text,
-        candidates=[SimpleNamespace(content=SimpleNamespace(role="model", parts=parts))],
+        candidates=[SimpleNamespace(content=types.Content(role="model", parts=parts))],
     )
+
+
+def roles_sent(client) -> list[list[str]]:
+    """The role of every Content sent, per request."""
+    out = []
+    for req in client.models.seen:
+        out.append([c["role"] if isinstance(c, dict) else c.role for c in req["contents"]])
+    return out
 
 
 class FakeModels:
@@ -101,7 +117,10 @@ class FakeModels:
         self.script, self.seen = list(script), []
 
     def generate_content(self, *, model, contents, config):
-        self.seen.append({"model": model, "contents": contents, "config": config})
+        # A copy: `contents` is the live list the agent keeps appending to, and
+        # the real SDK serializes it at call time, so each request has to be
+        # recorded as it was sent.
+        self.seen.append({"model": model, "contents": list(contents), "config": config})
         step = self.script.pop(0)
         if isinstance(step, Exception):
             raise step
@@ -390,3 +409,90 @@ def test_needs_refusal_boundaries():
               "Was the medicine list received?",
               "Appointment se pehle kya clarify karna hai?"]:
         assert not agent.needs_refusal(q), q
+
+
+# ---------------- the roles Gemini actually accepts ----------------
+# Production trace: 400 INVALID_ARGUMENT "Role 'tool' is not supported. Please
+# use a valid role: SYSTEM, USER, MODEL". Function results used to go back as a
+# Content with role "tool", so every tool-calling question fell through to the
+# rules engine.
+
+VALID_ROLES = {"user", "model"}
+
+
+def test_no_tool_role_is_ever_sent_and_the_llm_answers(gemini):
+    client = gemini(
+        turn(calls=[call("list_unresolved_followups")]),
+        turn(calls=[call("inspect_source_span", doc_id="D02", span_id="D02-P1")]),
+        turn(text=answer_json([{"text": "The referral was received on 15 October.",
+                                "sources": [{"doc_id": "D02", "span_id": "D02-P1"}]}],
+                              intent="item")),
+    )
+
+    res = agent.ask(PID, "Is the knee physio referral sorted?", "en")
+
+    # The whole point: the tool-calling conversation now completes.
+    assert res["engine"] == "llm"
+    assert res["intent"] == "item"
+    assert [s["span_id"] for s in res["sources"]] == ["D02-P1"]
+
+    sent = roles_sent(client)
+    assert sent, "the model was never called"
+    for roles in sent:
+        assert "tool" not in roles
+        assert "function" not in roles
+        assert set(roles) <= VALID_ROLES, roles
+    # Three requests: the question, then after one tool turn, then after two.
+    assert sent == [["user"], ["user", "model", "user"],
+                    ["user", "model", "user", "model", "user"]]
+
+
+def test_the_function_call_turn_goes_back_as_the_model(gemini):
+    client = gemini(
+        turn(calls=[call("latest_change")]),
+        turn(text=answer_json([{"text": "D02 documented the receipt.",
+                                "sources": [{"doc_id": "D02", "span_id": "D02-P1"}]}],
+                              intent="changes")),
+    )
+    agent.ask(PID, "What changed?", "en")
+
+    second = client.models.seen[1]["contents"]
+    assert second[1].role == "model"
+    assert second[1].parts[0].function_call.name == "latest_change"
+
+
+def test_the_tool_result_goes_back_as_a_user_function_response(gemini):
+    client = gemini(
+        turn(calls=[call("inspect_source_span", doc_id="D02", span_id="D02-P1")]),
+        turn(text=answer_json([{"text": "D02-P1 records the receipt.",
+                                "sources": [{"doc_id": "D02", "span_id": "D02-P1"}]}],
+                              intent="item")),
+    )
+    agent.ask(PID, "What does D02-P1 say?", "en")
+
+    reply = client.models.seen[1]["contents"][2]
+    assert reply.role == "user"
+    fr = reply.parts[0].function_response
+    assert fr.name == "inspect_source_span"
+    assert "D02-P1" in str(fr.response)
+
+
+def test_an_invalid_argument_error_is_traced_short_not_as_raw_json(gemini):
+    """What the production trace used to dump into the UI."""
+    gemini(RuntimeError(
+        "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': \"Role 'tool' is not "
+        "supported. Please use a valid role: SYSTEM, USER, MODEL, FUNCTION.\", "
+        "'status': 'INVALID_ARGUMENT'}}"))
+
+    res = agent.ask(PID, "What changed?", "en")
+
+    assert res["engine"] == "rules"
+    returned = res["trace"][0]["returned"]
+    assert returned == "Gemini unavailable: 400 INVALID_ARGUMENT — answered with rules instead"
+    assert "{" not in returned and "'message'" not in returned
+
+
+def test_a_plain_error_is_still_readable_in_the_trace(gemini):
+    gemini(RuntimeError("connection reset by peer"))
+    res = agent.ask(PID, "What changed?", "en")
+    assert "connection reset by peer" in res["trace"][0]["returned"]
