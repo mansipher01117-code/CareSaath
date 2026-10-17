@@ -210,17 +210,22 @@ def confirm_document(pid, doc_id, facts):
             date, time = appointment_of(f)
             if not (date and time):
                 continue  # half an appointment is not an appointment
-            aid = f"appt:{date}:{time}"
+            # The year is part of the identity: "20 October" in two different
+            # years is two appointments, and merging them would silently move
+            # one of them.
+            year = (f.get("year") or "").strip()
+            aid = f"appt:{year or 'year_unknown'}:{date}:{time}"
             q(
                 pid,
                 """
                 MATCH (p:Person {id:$pid}), (s:EvidenceSpan {id:$sid})
                 MERGE (a:Appointment {id:$aid})
-                ON CREATE SET a.date=$date, a.time=$time
+                ON CREATE SET a.date=$date, a.time=$time, a.year=$year
                 MERGE (p)-[:HAS_APPOINTMENT]->(a)
                 MERGE (s)-[:CONFIRMS]->(a)
                 """,
-                {"pid": pid, "sid": f["span_id"], "aid": aid, "date": date, "time": time},
+                {"pid": pid, "sid": f["span_id"], "aid": aid, "date": date, "time": time,
+                 "year": year},
             )
         # absence_note: informational, stays only in the source text
 
@@ -273,14 +278,37 @@ ORDER BY f.label
 """
 
 
+def _evidenced(rows: list[dict]) -> list[dict]:
+    """Evidence rows that name both a span and a *confirmed* document.
+
+    The query leaves doc_id null when the span belongs to a draft, so a row
+    with a span but no document is evidence nobody has confirmed yet. Newest
+    first, so the first row of each list is the one worth citing.
+    """
+    kept = [x for x in rows if x.get("span_id") and x.get("doc_id")]
+    return sorted(kept, key=lambda x: x.get("date") or "", reverse=True)
+
+
 def preparation(pid):
     rows = q(pid, PREP_CYPHER, {"pid": pid})
     name = (person(pid) or {}).get("name") or pid
     out = []
     for r in rows:
-        receipts = [x for x in r["receipts"] if x.get("span_id")]
-        requested = [x for x in r["requested_by"] if x.get("span_id")]
-        status = "receipt_documented" if receipts else "receipt_not_documented"
+        receipts = _evidenced(r["receipts"])
+        requested = _evidenced(r["requested_by"])
+        # An item nothing confirmed asks for or records is not being tracked.
+        # It is also what a confirm that failed half-way leaves behind, so
+        # skipping it keeps a partial write out of every reader's view.
+        if not (requested or receipts):
+            continue
+        # A receipt settles the request episode it follows, not every future
+        # one: when the newest request is more recent than the newest receipt,
+        # the item is being asked for again and an older receipt does not
+        # close it.
+        status = ("receipt_documented"
+                  if receipts and (receipts[0].get("date") or "")
+                  >= (requested[0].get("date") or "" if requested else "")
+                  else "receipt_not_documented")
         path = [f"Person:{name}"]
         if requested:
             path += [f"Document:{requested[0]['doc_id']}", f"Span:{requested[0]['span_id']}"]
@@ -299,35 +327,100 @@ def preparation_snapshot(pid):
     return {p["id"]: {"label": p["label"], "status": p["status"]} for p in preparation(pid)}
 
 
-def appointments(pid):
-    return q(
+MONTH_NUMBERS = {m: i for i, m in enumerate(
+    ["january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december"], start=1)}
+
+
+def iso_date(day_month: str, year: str) -> str:
+    """'20 October' + '2026' -> '2026-10-20'. Empty when the year is unknown,
+    because a date without a year cannot be placed on a calendar."""
+    parts = (day_month or "").replace(",", " ").split()
+    if len(parts) < 2 or not (year or "").strip().isdigit():
+        return ""
+    day, month = parts[0], MONTH_NUMBERS.get(parts[1].lower())
+    if not (day.isdigit() and month):
+        return ""
+    return f"{int(year):04d}-{month:02d}-{int(day):02d}"
+
+
+def appointments(pid, today: str | None = None):
+    """Confirmed appointments, soonest first.
+
+    `on` is the resolvable calendar date and `upcoming` says whether it is
+    still ahead; both are empty/False when the record never gave a year, so a
+    caller can say "year unknown" instead of inventing one.
+    """
+    rows = q(
         pid,
         """
         MATCH (p:Person {id:$pid})-[:HAS_APPOINTMENT]->(a:Appointment)
         OPTIONAL MATCH (s:EvidenceSpan)-[:CONFIRMS]->(a)
         OPTIONAL MATCH (d:Document {status:'confirmed'})-[:HAS_SPAN]->(s)
-        RETURN a.date AS date, a.time AS time,
+        RETURN a.date AS date, a.time AS time, a.year AS year,
                collect(DISTINCT {span_id:s.id, doc_id:d.id, text:s.text}) AS sources
         """,
         {"pid": pid},
     )
+    today = today or datetime.now(timezone.utc).date().isoformat()
+    out = []
+    for r in rows:
+        sources = [x for x in r["sources"] if x.get("span_id") and x.get("doc_id")]
+        if not sources:
+            continue  # nothing confirmed confirms it (or a confirm failed part-way)
+        r["year"] = (r.get("year") or "").strip()
+        r["sources"] = sources
+        r["on"] = iso_date(r["date"], r["year"])
+        r["upcoming"] = bool(r["on"]) and r["on"] >= today
+        out.append(r)
+    # Undated appointments sort last: they cannot be placed against today.
+    out.sort(key=lambda a: (a["on"] or "9999-12-31", a["time"] or ""))
+    return out
+
+
+CHANGE_RETURN = """
+RETURN c.doc_id AS doc_id, d.title AS doc_title, d.date AS doc_date, c.at AS at,
+       c.changed AS changed, c.unchanged AS unchanged, c.added AS added
+ORDER BY c.at DESC LIMIT 1
+"""
 
 
 def latest_change(pid):
-    rows = q(
-        pid,
-        """
-        MATCH (d:Document)-[:CAUSED]->(c:Change)
-        RETURN c.doc_id AS doc_id, d.title AS doc_title, d.date AS doc_date, c.at AS at,
-               c.changed AS changed, c.unchanged AS unchanged, c.added AS added
-        ORDER BY c.at DESC LIMIT 1
-        """,
-    )
+    return _change_row(pid, q(pid, f"MATCH (d:Document)-[:CAUSED]->(c:Change) {CHANGE_RETURN}"))
+
+
+def change_for(pid, doc_id):
+    """The change *this* document caused.
+
+    A retried confirm has to answer for the document it was given, not for
+    whichever document happened to be confirmed most recently — otherwise a
+    retry reports somebody else's diff as its own result.
+    """
+    return _change_row(pid, q(
+        pid, f"MATCH (d:Document {{id:$id}})-[:CAUSED]->(c:Change) {CHANGE_RETURN}",
+        {"id": doc_id}))
+
+
+def _change_row(pid, rows):
     if not rows:
         return None
     r = rows[0]
     for k in ("changed", "unchanged", "added"):
         r[k] = json.loads(r[k] or "[]")
+    # Give every entry the real span that evidences it, so a reader cites
+    # actual evidence instead of guessing at a span id.
+    evidence = {}
+    for item in preparation(pid):
+        for x in item["receipts"] + item["requested_by"]:
+            evidence.setdefault((item["id"], x["doc_id"]), x)
+            evidence.setdefault((item["id"], None), x)
+    for key in ("changed", "unchanged", "added"):
+        for entry in r[key]:
+            hit = (evidence.get((entry.get("id"), r["doc_id"]))
+                   or evidence.get((entry.get("id"), None)))
+            if hit:
+                entry["doc_id"] = hit["doc_id"]
+                entry["span_id"] = hit["span_id"]
     return r
 
 
@@ -374,6 +467,16 @@ def subgraph(pid):
         "RETURN a.id AS source, b.id AS target, type(r) AS type",
         {"ids": ids},
     )
+    # A fact with no surviving evidence span is one a confirm wrote before
+    # failing part-way: it is not in the records, so it is not in the picture.
+    # Reachable from a surviving span: span -> Receipt -> FollowUp is the
+    # longest chain, so three passes close it.
+    evidenced = {k for k, v in nodes.items() if v["type"] == "EvidenceSpan"}
+    for _ in range(3):
+        evidenced |= {e["target"] for e in edges if e["source"] in evidenced}
+    nodes = {k: v for k, v in nodes.items()
+             if v["type"] not in ("FollowUp", "Receipt", "Appointment") or k in evidenced}
+    edges = [e for e in edges if e["source"] in nodes and e["target"] in nodes]
     return {"nodes": list(nodes.values()), "edges": edges}
 
 

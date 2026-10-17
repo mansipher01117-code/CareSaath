@@ -68,3 +68,64 @@ def test_absence_note_label_is_a_sentence_not_an_item_name():
     follow-up called 'Receipt not documented: Discharge summary'."""
     f = one(NOTE, "absence_note")
     assert len(f["label"].split()) > 3
+
+
+# ---------------- one sentence's negation is not the paragraph's ----------------
+
+def types_in(text, date="2026-10-15"):
+    return [(f["type"], f.get("label") or f.get("item")) for f in extract("D01", text, date)["facts"]]
+
+
+def test_a_negative_clause_does_not_erase_a_positive_receipt():
+    """Both sentences are in one paragraph, so both are about one span. The
+    absence note used to swallow the whole paragraph and the receipt with it."""
+    found = types_in(
+        "The knee physio referral was received at the front desk. "
+        "No receipt of the old X-ray film is on file yet."
+    )
+    assert ("receipt", "Knee physio referral") in found
+    assert any(t == "absence_note" for t, _ in found)
+
+
+def test_a_request_survives_a_neighbouring_negative_sentence():
+    found = types_in(
+        "No receipt of the discharge summary has been recorded. "
+        "Please bring the insurance card to the appointment."
+    )
+    assert ("request", "Insurance card") in found
+
+
+def test_a_negated_sentence_on_its_own_still_produces_no_receipt():
+    found = types_in("The lab report was not received.")
+    assert not [t for t, _ in found if t == "receipt"]
+
+
+def test_each_sentence_keeps_the_paragraph_span():
+    out = extract("D01", "The referral was received. Please bring the insurance card.",
+                  "2026-10-15")
+    assert len(out["spans"]) == 1
+    assert {f["span_id"] for f in out["facts"]} == {"D01-P1"}
+
+
+# ---------------- the appointment year ----------------
+
+def appointment_in(text):
+    facts = extract("D01", text, "2026-10-15")["facts"]
+    return next(f for f in facts if f["type"] == "appointment")
+
+
+def test_an_appointment_keeps_a_year_the_record_gives():
+    f = appointment_in("Appointment confirmed for 20 October 2026 at 10:00 AM.")
+    assert (f["date"], f["year"], f["time"]) == ("20 October", "2026", "10:00 AM")
+
+
+def test_an_appointment_with_a_comma_before_the_year():
+    f = appointment_in("Appointment confirmed for 20 October, 2026 at 10:00 AM.")
+    assert (f["date"], f["year"]) == ("20 October", "2026")
+
+
+def test_an_appointment_without_a_year_says_so_instead_of_guessing():
+    """A note that never named the year does not get this one assumed for it."""
+    f = appointment_in("Appointment confirmed for 20 October at 10:00 AM.")
+    assert f["year"] == ""
+    assert f["date"] == "20 October" and f["time"] == "10:00 AM"

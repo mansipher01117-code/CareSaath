@@ -146,12 +146,29 @@ parameter, and returns 404 if no such profile exists.
 
 ## Honest limitations (v0.2)
 
-- Extraction is rule-based: it reads request/receipt phrasings out of the text,
-  so it will over- and under-match. Human review is the safety net.
+- Extraction is rule-based: it reads request/receipt phrasings sentence by
+  sentence, so it will over- and under-match. Human review is the safety net,
+  and every date, time and item name is editable there.
 - The LLM is free-tier Gemini Flash: on a rate limit, a timeout (20s) or malformed
   JSON the answer silently drops to the rules engine, which is more rigid and only
-  routes to three of the four tools.
+  routes to three of the four tools. Both engines refuse medical, dosage and
+  diagnosis questions, but the fallback does it by keyword, so it both misses
+  phrasings and occasionally refuses a records question that merely says "dose".
+- **A confirm is not one transaction.** Facts are written with several queries,
+  and FalkorDB gives no rollback across them. A confirm that dies half-way is
+  made *invisible* rather than undone: a follow-up or appointment with no
+  confirmed evidence behind it is skipped by `/preparation`, `/graph` and the
+  agent's tools. The orphan nodes stay in the graph.
+- An appointment only has a year if the record stated one. Without it the
+  appointment cannot be ordered against today, so it is never called the "next"
+  one — it is shown as "appointment on record" with the year marked unknown.
+- A follow-up is one item, not one episode per request. Repeat requests reopen
+  it by date (a receipt older than the newest request does not close it), but
+  the history of each round is not kept separately.
 - English + Hindi/Hinglish answers only; UI chrome is English.
 - Text entry only; no file upload yet.
+- Connects to a local FalkorDB (server or embedded). There is no support for a
+  username or password, so a managed/cloud FalkorDB that requires credentials
+  will not connect.
 - **No auth.** Every profile on the server is visible to anyone who can reach
   the API — run it locally, and think before putting real health data in it.

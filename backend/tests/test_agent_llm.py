@@ -345,3 +345,48 @@ def test_an_unknown_language_is_answered_in_english(monkeypatch):
     assert res["lang"] == "en"
     assert res["answer"] == ["Appointment confirmed for 20 October at 10:00 AM (D01)."]
     assert res["claims"][0]["sources"][0]["span_id"] == "D01-P2"
+
+
+# ---------------- the rules engine refuses what it must not answer ----------------
+
+def test_the_rules_engine_refuses_medical_advice(monkeypatch):
+    """Without a key there is no model to apply the refusal rule, and the
+    router used to answer a dosage question with appointment details."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    res = agent.ask(PID, "Should I reduce her painkiller dose before the visit?", "en")
+
+    assert res["engine"] == "rules"
+    assert res["intent"] == "refusal"
+    assert res["sources"] == [] and res["claims"][0]["sources"] == []
+    assert "ask the doctor" in res["answer"][0].lower()
+    # Nothing was read: a refusal is not an answer about the records.
+    assert [t["tool"] for t in res["trace"] if t["tool"] != "gemini"] == []
+    assert "20 October" not in json.dumps(res)
+
+
+def test_the_rules_refusal_speaks_the_requested_language(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    res = agent.ask(PID, "Kitni dawa deni chahiye?", "hi")
+    assert res["intent"] == "refusal"
+    assert "doctor se poochhein" in res["answer"][0].lower()
+
+
+def test_records_questions_that_mention_a_medicine_are_still_answered(monkeypatch):
+    """The guard must not swallow a legitimate question about the records."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    for question in ["What should I clarify before the appointment?",
+                     "Was the medicine list received?",
+                     "When is the appointment?"]:
+        res = agent.ask(PID, question, "en")
+        assert res["intent"] != "refusal", question
+
+
+def test_needs_refusal_boundaries():
+    for q in ["Should I halve her evening dose?", "Is it safe to skip the tablet?",
+              "What is her diagnosis?", "Can I give her the painkiller?"]:
+        assert agent.needs_refusal(q), q
+    for q in ["What should I clarify before the appointment?",
+              "What should I bring to the appointment?",
+              "Was the medicine list received?",
+              "Appointment se pehle kya clarify karna hai?"]:
+        assert not agent.needs_refusal(q), q

@@ -127,4 +127,36 @@ void main() {
     expect(find.text('D01-P1'), findsOneWidget);
     expect(find.text('D02-P1'), findsOneWidget);
   });
+
+  outdatedTests();
+}
+
+// An answer read before a record was confirmed is no longer current. It is not
+// hidden — it was true when asked, and its sources still say what they said —
+// but it stops being presented as the state of the graph now.
+void outdatedTests() {
+  testWidgets('an answer whose records have moved is marked outdated', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(child: AnswerCard(answer: llmAnswer(), outdated: true)),
+      ),
+    ));
+
+    expect(find.text('May be outdated'), findsOneWidget);
+    expect(find.textContaining('A record was confirmed after this answer'), findsOneWidget);
+    // The answer and its evidence are still there.
+    expect(find.text('D01-P1'), findsOneWidget);
+    expect(find.text('AI'), findsOneWidget);
+  });
+
+  testWidgets('a current answer carries no outdated marker', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(child: AnswerCard(answer: llmAnswer())),
+      ),
+    ));
+
+    expect(find.text('May be outdated'), findsNothing);
+    expect(find.textContaining('A record was confirmed after'), findsNothing);
+  });
 }

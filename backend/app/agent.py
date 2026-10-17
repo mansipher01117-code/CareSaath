@@ -194,6 +194,49 @@ STOPWORDS = {
 }
 
 
+# Questions the rules engine must not answer out of the records. The LLM is
+# told to refuse these in its system prompt; the rules engine has no judgement
+# to apply mid-answer, so it declines up front instead of replying with
+# whatever the router happened to match — which is how "should I halve her
+# evening dose?" used to come back as appointment details.
+# Deliberately narrow, in two parts. A clinical judgement word refuses on its
+# own; asking-for-advice phrasing only refuses when it is asked *about*
+# something clinical. "What should I clarify before the appointment?" is
+# advice-seeking phrasing about nothing clinical, and must still be answered;
+# "was the medicine list received?" names a medicine but asks what the record
+# says, and must still be answered too.
+CLINICAL_RE = re.compile(r"\b(?:dose|dosage|diagnos\w*)\b|\bis\s+it\s+(?:safe|serious|dangerous)\b",
+                         re.I)
+ADVICE_FRAME_RE = re.compile(
+    r"\b(?:should|shall|can|could|may)\s+(?:i|we|she|he|they)\b"
+    r"|\bis\s+it\s+(?:normal|ok|okay|fine)\b"
+    r"|\bhow\s+(?:much|many)\b"
+    r"|\bkya\s+karna\s+chahiye\b"
+    r"|\bkitn[aiī]\b",
+    re.I,
+)
+ADVICE_SUBJECT_RE = re.compile(
+    r"\b(?:medicine|medicines|medication|tablet|tablets|pill|pills|painkiller|antibiotic"
+    r"|insulin|injection|syrup|drug|drugs|dawa|dawai|goli|khurak)\b"
+    r"|\b(?:halve|double|skip|reduce|increase|stop|badha|band)\b",
+    re.I,
+)
+
+REFUSAL = {
+    "en": ("CareSaath only explains what the records say, so it can't advise on "
+           "medicines, doses or a diagnosis — please ask the doctor."),
+    "hi": ("CareSaath sirf yeh batata hai ki records mein kya likha hai — dawa, "
+           "khurak ya diagnosis par salah nahi de sakta. Doctor se poochhein."),
+}
+
+
+def needs_refusal(question: str) -> bool:
+    q = question or ""
+    if CLINICAL_RE.search(q):
+        return True
+    return bool(ADVICE_FRAME_RE.search(q) and ADVICE_SUBJECT_RE.search(q))
+
+
 def route(q: str) -> tuple[str, list[str]]:
     low = q.lower()
     if any(w in low for w in CHANGE_WORDS):
@@ -409,9 +452,14 @@ def _respond(pid, question, lang, intent, engine, claims, results, trace, matche
 
 def rules_ask(pid: str, question: str, lang: str = "en", note: dict | None = None):
     tools = tools_for(pid)
+    trace = [note] if note else []
+    if needs_refusal(question):
+        # No tools are read: there is nothing in the records that answers this.
+        return _respond(pid, question, lang, "refusal", "rules",
+                        [_claim(REFUSAL.get(lang, REFUSAL["en"]))], {}, trace)
+
     intent, tool_names = route(question)
     results: dict = {}
-    trace = [note] if note else []
     for name in tool_names:
         results[name] = tools[name]()
         trace.append({"tool": name, "args": {}, "returned": _summarize(results[name])})

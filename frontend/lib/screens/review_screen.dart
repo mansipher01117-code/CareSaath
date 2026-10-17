@@ -43,6 +43,25 @@ class _ReviewScreenState extends State<ReviewScreen> {
   static bool _appointmentReady(Json f) =>
       '${f['date'] ?? ''}'.trim().isNotEmpty && '${f['time'] ?? ''}'.trim().isNotEmpty;
 
+  /// Controllers for the date, time, year and receipt-date fields, created on
+  /// demand so a fact that has no such field costs nothing.
+  final Map<String, TextEditingController> _dates = {};
+
+  TextEditingController _dateField(int i, String key) =>
+      _dates.putIfAbsent('$i.$key', () {
+        final c = TextEditingController(text: '${facts[i][key] ?? ''}');
+        c.addListener(() => setState(() => facts[i][key] = c.text.trim()));
+        return c;
+      });
+
+  /// Drop the controllers for one fact, so a type switch does not leave the
+  /// previous type's date sitting in a field the reviewer can no longer see.
+  void _clearDateFields(int i) {
+    for (final key in ['date', 'time', 'year']) {
+      _dates.remove('$i.$key')?.dispose();
+    }
+  }
+
   /// Why this fact cannot be written yet, or null when it can be.
   String? _blocker(int i) {
     final f = facts[i];
@@ -79,15 +98,20 @@ class _ReviewScreenState extends State<ReviewScreen> {
     if (newType == 'appointment' && oldType == 'appointment') {
       next['date'] = f['date'];
       next['time'] = f['time'];
+      next['year'] = f['year'];
     }
     if (newType == 'absence_note' && f['items'] != null) next['items'] = f['items'];
 
+    _clearDateFields(i);
     setState(() => facts[i] = next);
   }
 
   @override
   void dispose() {
     for (final c in labels) {
+      c.dispose();
+    }
+    for (final c in _dates.values) {
       c.dispose();
     }
     super.dispose();
@@ -233,6 +257,17 @@ class _ReviewScreenState extends State<ReviewScreen> {
     );
   }
 
+  Widget _dateInput(int i, String key, String label, String hint) => TextField(
+        controller: _dateField(i, key),
+        decoration: InputDecoration(
+          isDense: true,
+          labelText: label,
+          hintText: hint,
+          hintStyle: const TextStyle(fontSize: 12),
+        ),
+        style: const TextStyle(fontSize: 14),
+      );
+
   Widget _factCard(int i) {
     final f = facts[i];
     final type = f['type'] as String;
@@ -274,10 +309,36 @@ class _ReviewScreenState extends State<ReviewScreen> {
                   ),
                 ),
               ),
-            if (type == 'appointment' && _appointmentReady(f))
-              Padding(padding: const EdgeInsets.only(left: 48), child: Text('${f['date']} · ${f['time']}')),
+            if (type == 'appointment')
+              Padding(
+                padding: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
+                child: Column(children: [
+                  Row(children: [
+                    Expanded(child: _dateInput(i, 'date', 'Date', 'e.g. 20 October')),
+                    const SizedBox(width: 10),
+                    Expanded(child: _dateInput(i, 'time', 'Time', 'e.g. 10:00 AM')),
+                  ]),
+                  const SizedBox(height: 6),
+                  Row(children: [
+                    SizedBox(width: 92, child: _dateInput(i, 'year', 'Year', 'YYYY')),
+                    const SizedBox(width: 10),
+                    // A record that never said the year must not have one
+                    // invented for it, so an empty field is a real answer.
+                    Expanded(
+                      child: Text(
+                          '${f['year'] ?? ''}'.trim().isEmpty
+                              ? 'Year unknown — leave blank unless the record says it.'
+                              : 'Year taken from the record.',
+                          style: const TextStyle(color: C.muted, fontSize: 12, height: 1.3)),
+                    ),
+                  ]),
+                ]),
+              ),
             if (type == 'receipt')
-              Padding(padding: const EdgeInsets.only(left: 48, top: 4), child: Text('Receipt date: ${f['date'] ?? ''}', style: const TextStyle(color: C.muted))),
+              Padding(
+                padding: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
+                child: _dateInput(i, 'date', 'Receipt date', 'YYYY-MM-DD, or blank if unknown'),
+              ),
             if (type == 'absence_note')
               Padding(
                 padding: const EdgeInsets.only(left: 48),

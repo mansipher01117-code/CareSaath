@@ -32,8 +32,11 @@ class TodayScreen extends StatelessWidget {
         final left = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _Header(person: person),
           const SizedBox(height: 20),
+          // The backend returns appointments soonest first; "Next" is only
+          // honest about one that is still ahead.
           if (appts.isNotEmpty)
-            _AppointmentCard(appt: appts.first)
+            AppointmentCard(appt: appts.firstWhere((a) => a['upcoming'] == true,
+                orElse: () => appts.first))
           else
             const EmptyState(
               icon: Icons.event_busy_outlined,
@@ -68,7 +71,7 @@ class TodayScreen extends StatelessWidget {
         ]);
 
         final right = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (change.isNotEmpty) _ChangeCard(change: change),
+          if (change.isNotEmpty) ChangeCard(change: change),
           if (change.isNotEmpty) const SizedBox(height: 16),
           _AskCard(onAsk: onAsk, name: (person['name'] ?? '').toString()),
         ]);
@@ -134,13 +137,15 @@ class _Header extends StatelessWidget {
   }
 }
 
-class _AppointmentCard extends StatelessWidget {
+class AppointmentCard extends StatelessWidget {
   final Json appt;
-  const _AppointmentCard({required this.appt});
+  const AppointmentCard({super.key, required this.appt});
 
   @override
   Widget build(BuildContext context) {
     final src = (appt['sources'] as List).cast<Json>().where((s) => s['span_id'] != null).toList();
+    final year = '${appt['year'] ?? ''}'.trim();
+    final upcoming = appt['upcoming'] == true;
     return Container(
       padding: const EdgeInsets.all(22),
       decoration: BoxDecoration(
@@ -161,10 +166,18 @@ class _AppointmentCard extends StatelessWidget {
         const SizedBox(width: 18),
         Expanded(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            const Eyebrow('Next appointment', color: Colors.white70),
+            // Only an appointment still ahead is the "next" one. Anything else
+            // gets a label that claims nothing about when it is.
+            Eyebrow(upcoming ? 'Next appointment' : 'Appointment on record',
+                color: Colors.white70),
             const SizedBox(height: 4),
             Text('${appt['time']} · confirmed',
                 style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.w700)),
+            Text(year.isEmpty ? 'Year not stated in the record' : year,
+                style: TextStyle(
+                    color: Colors.white.withValues(alpha: year.isEmpty ? 0.6 : 0.8),
+                    fontSize: 12,
+                    fontStyle: year.isEmpty ? FontStyle.italic : FontStyle.normal)),
           ]),
         ),
         if (src.isNotEmpty) SourceChip(spanId: src.first['span_id'], docId: src.first['doc_id']),
@@ -237,9 +250,9 @@ class _EvidenceLine extends StatelessWidget {
 }
 
 /// "What changed" after the last confirmed record: what moved, what stayed.
-class _ChangeCard extends StatelessWidget {
+class ChangeCard extends StatelessWidget {
   final Json change;
-  const _ChangeCard({required this.change});
+  const ChangeCard({super.key, required this.change});
 
   String _s(String s) => s == 'receipt_documented' ? 'Documented' : 'Not documented';
 
@@ -258,31 +271,37 @@ class _ChangeCard extends StatelessWidget {
         Text(change['doc_date'] ?? '', style: const TextStyle(color: C.muted)),
         const SizedBox(height: 14),
         for (final c in changed)
-          _row(Icons.change_circle_rounded, C.teal, c['label'],
+          _row(Icons.change_circle_rounded, C.teal, c,
               Row(mainAxisSize: MainAxisSize.min, children: [
                 Text(_s(c['from']), style: const TextStyle(decoration: TextDecoration.lineThrough, color: C.muted, fontSize: 13)),
                 const Icon(Icons.arrow_forward_rounded, size: 14, color: C.muted),
                 Text(_s(c['to']), style: const TextStyle(color: C.teal, fontWeight: FontWeight.w700, fontSize: 13)),
               ])),
         for (final c in added)
-          _row(Icons.add_circle_rounded, C.plum, c['label'],
+          _row(Icons.add_circle_rounded, C.plum, c,
               const Text('Now tracked', style: TextStyle(color: C.plum, fontWeight: FontWeight.w700, fontSize: 13))),
         for (final c in unchanged)
-          _row(Icons.pause_circle_outline_rounded, C.muted, c['label'],
+          _row(Icons.pause_circle_outline_rounded, C.muted, c,
               Text('Unchanged · ${_s(c['status'])}', style: const TextStyle(color: C.muted, fontSize: 13))),
-        const SizedBox(height: 6),
-        SourceChip(spanId: '${change['doc_id']}-P1', docId: change['doc_id']),
       ]),
     );
   }
 
-  Widget _row(IconData icon, Color color, String label, Widget trailing) => Padding(
+  /// Each row cites the span that actually evidences that item. The card used
+  /// to show one chip for the whole change, pointing at a guessed "<doc>-P1" —
+  /// a span id that often did not exist, and when it did, usually belonged to
+  /// an unrelated paragraph.
+  Widget _row(IconData icon, Color color, Json entry, Widget trailing) => Padding(
         padding: const EdgeInsets.only(bottom: 10),
         child: Row(children: [
           Icon(icon, color: color, size: 20),
           const SizedBox(width: 10),
-          Expanded(child: Text(label, style: const TextStyle(fontWeight: FontWeight.w700))),
+          Expanded(child: Text('${entry['label']}', style: const TextStyle(fontWeight: FontWeight.w700))),
           Flexible(child: Align(alignment: Alignment.centerRight, child: trailing)),
+          if (entry['span_id'] != null) ...[
+            const SizedBox(width: 8),
+            SourceChip(spanId: entry['span_id'], docId: entry['doc_id']),
+          ],
         ]),
       );
 }

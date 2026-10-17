@@ -5,9 +5,11 @@ graph (`person_<id>`), so one family member's records are invisible to another.
 
 Run:  uvicorn app.main:app --reload --port 8000
 """
+from typing import Annotated, Literal
+
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
 from . import agent, db, graph_ops as g, people
 from .extractor import extract
@@ -30,7 +32,54 @@ class RecordIn(BaseModel):
     text: str = Field(min_length=3, max_length=20000)
 
 
+# ---------------- reviewed facts ----------------
+# Each fact type carries its own required fields, so a fact that arrived with
+# the wrong shape — an appointment relabelled as a receipt, a request with a
+# time but no item — is rejected by name before anything is written.
+
+class FactIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    span_id: str = Field(min_length=1, max_length=64)
+
+
+class RequestFact(FactIn):
+    type: Literal["request"]
+    label: str = Field(min_length=1, max_length=120)
+    item: str = ""
+
+
+class ReceiptFact(FactIn):
+    type: Literal["receipt"]
+    label: str = Field(min_length=1, max_length=120)
+    item: str = ""
+    date: str = Field(default="", pattern=r"^(\d{4}-\d{2}-\d{2})?$")
+
+
+class AppointmentFact(FactIn):
+    type: Literal["appointment"]
+    date: str = Field(min_length=1, max_length=40)
+    time: str = Field(min_length=1, max_length=20)
+    # A record that never gave a year leaves this empty rather than guessing.
+    year: str = Field(default="", pattern=r"^(\d{4})?$")
+    label: str = Field(default="Appointment", max_length=120)
+
+
+class AbsenceFact(FactIn):
+    type: Literal["absence_note"]
+    label: str = Field(default="", max_length=240)
+    items: list[str] = []
+
+
+Fact = Annotated[
+    RequestFact | ReceiptFact | AppointmentFact | AbsenceFact,
+    Field(discriminator="type"),
+]
+FACT_ADAPTER = TypeAdapter(list[Fact])
+
+
 class ConfirmIn(BaseModel):
+    # Parsed into the typed union by `_typed_facts`, which reports a 400
+    # naming the offending field instead of FastAPI's 422 body dump.
     facts: list[dict]
 
 
@@ -141,23 +190,48 @@ def preview(rec: RecordIn, pid: str = Pid):
 FACT_TYPES = ("request", "receipt", "appointment", "absence_note")
 
 
-def _validate_fact(f: dict):
-    """A reviewed fact must carry the fields its own type needs.
+def _fact_error(e: ValidationError) -> str:
+    """A schema error, phrased as the reviewer's problem rather than pydantic's."""
+    first = e.errors()[0]
+    loc = [str(p) for p in first["loc"]]
+    if first["type"] in ("union_tag_invalid", "union_tag_not_found"):
+        given = first.get("input")
+        return f"Unknown fact type {(given.get('type') if isinstance(given, dict) else None)!r}"
+    fact_type, field = (loc[1] if len(loc) > 2 else ""), loc[-1]
+    if field == "label" and fact_type in ("request", "receipt"):
+        return f"A {fact_type} fact needs an item name"
+    if field in ("date", "time") and fact_type == "appointment":
+        return "An appointment fact needs both a date and a time"
+    return f"Invalid fact at {'.'.join(loc) or '?'}: {first['msg']}"
+
+
+def _typed_facts(raw: list[dict], span_ids: set[str]) -> list[dict]:
+    """Validate reviewed facts against their own schema, before any write.
 
     Changing a fact's type on the Review screen used to leave the previous
     type's fields behind — an appointment relabelled as a receipt arrived with
     no item name, a request relabelled as an appointment with no time — and
     each of those wrote a nameless follow-up or an empty appointment into the
-    graph. The client now rebuilds the fact on every type change; this is the
+    graph. The client rebuilds the fact on every type change; this is the
     guarantee that nothing else can.
     """
-    t = f.get("type")
-    if t not in FACT_TYPES:
-        raise HTTPException(400, f"Unknown fact type {t!r}")
-    if t in ("request", "receipt") and not g.item_of(f)[0]:
-        raise HTTPException(400, f"A {t} fact needs an item name")
-    if t == "appointment" and not all(g.appointment_of(f)):
-        raise HTTPException(400, "An appointment fact needs both a date and a time")
+    try:
+        facts = FACT_ADAPTER.validate_python(raw)
+    except ValidationError as e:
+        raise HTTPException(400, _fact_error(e)) from e
+
+    out = []
+    for f in facts:
+        d = f.model_dump()
+        if d["span_id"] not in span_ids:
+            raise HTTPException(400, f"Fact cites unknown span {d['span_id']}")
+        # A label of only spaces passes a length check but names nothing.
+        if d["type"] in ("request", "receipt") and not g.item_of(d)[0]:
+            raise HTTPException(400, f"A {d['type']} fact needs an item name")
+        if d["type"] == "appointment" and not all(g.appointment_of(d)):
+            raise HTTPException(400, "An appointment fact needs both a date and a time")
+        out.append(d)
+    return out
 
 
 @app.post("/records/{doc_id}/confirm")
@@ -166,13 +240,16 @@ def confirm(doc_id: str, body: ConfirmIn, pid: str = Pid):
     if not d:
         raise HTTPException(404, "Record not found")
     if d["status"] == "confirmed":
-        return {"already_confirmed": True, "change": g.latest_change(pid)}
-    span_ids = {s["id"] for s in d["spans"]}
-    for f in body.facts:
-        if f.get("span_id") not in span_ids:
-            raise HTTPException(400, f"Fact cites unknown span {f.get('span_id')}")
-        _validate_fact(f)
-    change = g.confirm_document(pid, doc_id, body.facts)
+        # Answer for this document, not for whatever was confirmed last.
+        return {"already_confirmed": True, "change": g.change_for(pid, doc_id) or {}}
+    facts = _typed_facts(body.facts, {s["id"] for s in d["spans"]})
+    # Re-check for a duplicate here too: the same record can have been
+    # confirmed from another tab between this draft's preview and its confirm.
+    dup = g.find_confirmed_duplicate(pid, g.content_hash(d["title"], d["date"], d.get("text") or ""))
+    if dup:
+        g.discard_draft(pid, doc_id)
+        return {"duplicate_of": dup, "change": g.change_for(pid, dup) or {}}
+    change = g.confirm_document(pid, doc_id, facts)
     return {"confirmed": doc_id, "change": change}
 
 
