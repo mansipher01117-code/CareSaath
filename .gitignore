@@ -3,3 +3,7 @@ __pycache__/
 backend/data/
 frontend/.dart_tool/
 frontend/build/
+
+# Secrets: .env holds the Gemini key. The committed template is .env.example.
+.env
+!.env.example

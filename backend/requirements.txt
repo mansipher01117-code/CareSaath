@@ -2,5 +2,9 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 falkordb>=1.0
 pydantic>=2.6
+python-dotenv>=1.0
+# The LLM that answers in the Ask screen. Without a key the agent falls back to
+# the deterministic rules engine, so this stays optional at runtime.
+google-genai>=1.0
 # Optional: embedded FalkorDB when Docker isn't available (Linux/macOS)
 # falkordblite>=0.10
