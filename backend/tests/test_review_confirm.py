@@ -34,8 +34,11 @@ def test_valid_facts_are_written(client, graph, draft):
 
     fids = {p["fid"] for _, _, p in graph.writes if "fid" in p}
     assert fids == {"fu:knee_physio_referral"}
+    # The year is part of an appointment's identity, and this note never gave
+    # one, so it is recorded as unknown rather than assumed.
     aids = {p["aid"] for _, _, p in graph.writes if "aid" in p}
-    assert aids == {"appt:20 October:10:00 AM"}
+    assert aids == {"appt:year_unknown:20 October:10:00 AM"}
+    assert {p["year"] for _, _, p in graph.writes if "year" in p} == {""}
 
 
 def test_writes_only_touch_that_persons_graph(client, graph, draft):
@@ -164,3 +167,85 @@ def test_appointment_of_requires_both_halves():
     assert not all(g.appointment_of({"time": "10:00 AM"}))
     assert not all(g.appointment_of({"date": "  ", "time": "  "}))
     assert not all(g.appointment_of({}))
+
+
+# ---------------- the fact schema is typed, and rejects before any write ----------------
+
+def test_a_fact_carrying_another_types_fields_is_rejected(client, graph, draft):
+    """A receipt that still has the appointment's time on it never arrived from
+    the Review screen, so it is a sign something built the fact by hand."""
+    r = confirm(client, [dict(GOOD_RECEIPT, time="10:00 AM")])
+    assert r.status_code == 400
+    assert "time" in r.json()["detail"]
+    assert graph.writes == []
+
+
+def test_an_unknown_field_is_rejected(client, graph, draft):
+    r = confirm(client, [dict(GOOD_RECEIPT, reviewed_by="someone")])
+    assert r.status_code == 400
+    assert graph.writes == []
+
+
+def test_a_receipt_date_must_be_a_real_date(client, graph, draft):
+    r = confirm(client, [dict(GOOD_RECEIPT, date="last Tuesday")])
+    assert r.status_code == 400
+    assert graph.writes == []
+
+
+def test_an_appointment_year_must_be_four_digits(client, graph, draft):
+    r = confirm(client, [dict(GOOD_APPOINTMENT, year="26")])
+    assert r.status_code == 400
+    assert graph.writes == []
+
+
+def test_an_appointment_year_is_carried_through(client, graph, draft):
+    r = confirm(client, [dict(GOOD_APPOINTMENT, year="2026")])
+    assert r.status_code == 200, r.text
+    aids = {p["aid"] for _, _, p in graph.writes if "aid" in p}
+    assert aids == {"appt:2026:20 October:10:00 AM"}
+
+
+def test_two_years_of_the_same_date_are_two_appointments(client, graph, draft):
+    confirm(client, [dict(GOOD_APPOINTMENT, year="2026"),
+                     dict(GOOD_APPOINTMENT, year="2027", span_id="R07-P1")])
+    assert {p["aid"] for _, _, p in graph.writes if "aid" in p} == {
+        "appt:2026:20 October:10:00 AM", "appt:2027:20 October:10:00 AM"}
+
+
+def test_a_span_id_is_still_required(client, graph, draft):
+    r = confirm(client, [{"type": "request", "label": "Knee physio referral"}])
+    assert r.status_code == 400
+    assert graph.writes == []
+
+
+# ---------------- retrying a confirm ----------------
+
+def test_a_retried_confirm_returns_that_documents_own_change(client, graph, draft, monkeypatch):
+    """Re-posting a confirm used to answer with the globally latest change,
+    which after any later record belongs to a different document."""
+    draft["status"] = "confirmed"
+    monkeypatch.setattr(g, "change_for",
+                        lambda pid, doc_id: {"doc_id": doc_id, "changed": [], "added": [],
+                                             "unchanged": []})
+    monkeypatch.setattr(g, "latest_change",
+                        lambda pid: {"doc_id": "SOMETHING_ELSE", "changed": []})
+
+    r = confirm(client, [GOOD_RECEIPT])
+    assert r.status_code == 200
+    body = r.json()
+    assert body["already_confirmed"] is True
+    assert body["change"]["doc_id"] == "R07"
+    assert graph.writes == []
+
+
+def test_a_duplicate_found_at_confirm_time_discards_the_draft(client, graph, draft, monkeypatch):
+    """The same record was confirmed from another tab after this preview."""
+    monkeypatch.setattr(g, "find_confirmed_duplicate", lambda pid, h: "R02")
+    monkeypatch.setattr(g, "change_for", lambda pid, doc_id: {"doc_id": doc_id})
+
+    r = confirm(client, [GOOD_RECEIPT])
+    assert r.status_code == 200
+    assert r.json()["duplicate_of"] == "R02"
+    assert r.json()["change"]["doc_id"] == "R02"
+    # No second copy of the facts was written.
+    assert not [c for _, c, _ in graph.writes if "DOCUMENTS_RECEIPT" in c]

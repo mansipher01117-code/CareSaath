@@ -83,9 +83,22 @@ NOT_AN_ITEM = {
 }
 
 MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
+# The year is captured when the text gives one. A note that says "20 October"
+# and nothing else genuinely does not say which year, so the year is returned
+# empty rather than assumed to be this one — "20 October" in a December note
+# usually means next year, and guessing silently is how an appointment card
+# ends up confidently wrong.
 APPT_RE = re.compile(
-    rf"(\d{{1,2}})\s+({MONTHS})[^.\n]*?(\d{{1,2}}(?::\d{{2}})?\s*(?:AM|PM|am|pm))", re.I
+    rf"(\d{{1,2}})\s+({MONTHS})\s*,?\s*(\d{{4}})?[^.\n]*?"
+    rf"(\d{{1,2}}(?::\d{{2}})?\s*(?:AM|PM|am|pm))",
+    re.I,
 )
+
+# Sentence end, including the Devanagari danda. Negation and absence are read
+# per sentence, not per paragraph: one paragraph often carries a receipt and a
+# separate "no receipt of X" clause, and judging the whole paragraph by its
+# negative clause threw the positive one away.
+SENTENCE_RE = re.compile(r"(?<=[.!?।])\s+")
 
 STRIP_CHARS = " \t\"'“”‘’()[]:-–—"
 
@@ -142,6 +155,11 @@ def split_paragraphs(text: str) -> list[str]:
     return parts or [text.strip()]
 
 
+def split_sentences(paragraph: str) -> list[str]:
+    parts = [s.strip() for s in SENTENCE_RE.split(paragraph) if s.strip()]
+    return parts or [paragraph.strip()]
+
+
 def _first_match(paragraph: str, *regexes) -> str | None:
     for rx in regexes:
         m = rx.search(paragraph)
@@ -157,19 +175,21 @@ def extract(doc_id: str, text: str, record_date: str) -> dict:
         span_id = f"{doc_id}-P{i}"
         spans.append({"id": span_id, "index": i, "text": p})
 
-        absence = ABSENCE_RE.search(p)
-        if absence:
-            found = items_from(absence.group("obj"))
-            if found:
-                facts.append({
-                    "type": "absence_note", "span_id": span_id,
-                    "items": [k for k, _ in found],
-                    "label": "Receipt not documented: " + ", ".join(l for _, l in found),
-                })
-        else:
-            negated = bool(NEGATION_RE.search(p))
+        # One sentence's negation says nothing about the next one's.
+        for sentence in split_sentences(p):
+            absence = ABSENCE_RE.search(sentence)
+            if absence:
+                found = items_from(absence.group("obj"))
+                if found:
+                    facts.append({
+                        "type": "absence_note", "span_id": span_id,
+                        "items": [k for k, _ in found],
+                        "label": "Receipt not documented: " + ", ".join(l for _, l in found),
+                    })
+                continue
+            negated = bool(NEGATION_RE.search(sentence))
             receipt_obj = _first_match(
-                p, RECEIPT_RE, HI_RECEIPT_RE, HINGLISH_RECEIPT_RE, ACTIVE_RECEIPT_RE
+                sentence, RECEIPT_RE, HI_RECEIPT_RE, HINGLISH_RECEIPT_RE, ACTIVE_RECEIPT_RE
             )
             if receipt_obj and not negated:
                 for key, label in items_from(receipt_obj):
@@ -178,7 +198,7 @@ def extract(doc_id: str, text: str, record_date: str) -> dict:
                         "span_id": span_id, "date": record_date,
                     })
             request_obj = _first_match(
-                p, POLITE_REQUEST_RE, REQUEST_RE, HI_REQUEST_RE, HINGLISH_REQUEST_RE
+                sentence, POLITE_REQUEST_RE, REQUEST_RE, HI_REQUEST_RE, HINGLISH_REQUEST_RE
             )
             if request_obj and not negated:
                 for key, label in items_from(request_obj):
@@ -190,8 +210,8 @@ def extract(doc_id: str, text: str, record_date: str) -> dict:
         if m and ("appointment" in p.lower() or "अपॉइंटमेंट" in p):
             facts.append({
                 "type": "appointment", "span_id": span_id,
-                "date": f"{m.group(1)} {m.group(2).title()}", "time": m.group(3).upper(),
-                "label": "Appointment",
+                "date": f"{m.group(1)} {m.group(2).title()}", "year": m.group(3) or "",
+                "time": m.group(4).upper(), "label": "Appointment",
             })
 
     seen, unique = set(), []

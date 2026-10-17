@@ -59,8 +59,15 @@ Future<void> switchTypeTo(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
-String itemFieldText(WidgetTester tester) =>
-    tester.widget<TextField>(find.byType(TextField)).controller!.text;
+/// A card now holds several text fields (item, date, time, year), so each is
+/// addressed by its own label rather than by position.
+Finder field(String label) => find.byWidgetPredicate(
+    (w) => w is TextField && w.decoration?.labelText == label);
+
+String fieldText(WidgetTester tester, String label) =>
+    tester.widget<TextField>(field(label)).controller!.text;
+
+String itemFieldText(WidgetTester tester) => fieldText(tester, 'Item');
 
 void main() {
   testWidgets('a request keeps its item name when corrected to a receipt', (tester) async {
@@ -77,7 +84,8 @@ void main() {
   testWidgets('an appointment switched to a receipt does not inherit "Appointment" as the item',
       (tester) async {
     await pumpReview(tester, draft(facts: [appointmentFact]));
-    expect(find.text('20 October · 10:00 AM'), findsOneWidget);
+    expect(fieldText(tester, 'Date'), '20 October');
+    expect(fieldText(tester, 'Time'), '10:00 AM');
 
     await switchTypeTo(tester, 'Receipt');
 
@@ -125,7 +133,7 @@ void main() {
     await switchTypeTo(tester, 'Receipt');
     expect(find.text('Confirm 0 fact(s)'), findsOneWidget);
 
-    await tester.enterText(find.byType(TextField), 'Knee physio referral');
+    await tester.enterText(field('Item'), 'Knee physio referral');
     await tester.pumpAndSettle();
 
     expect(find.text('Confirm 1 fact(s)'), findsOneWidget);
@@ -134,7 +142,7 @@ void main() {
 
   testWidgets('an item name survives a detour through another type', (tester) async {
     await pumpReview(tester, draft(facts: [requestFact]));
-    await tester.enterText(find.byType(TextField), 'Physio referral');
+    await tester.enterText(field('Item'), 'Physio referral');
     await tester.pumpAndSettle();
 
     await switchTypeTo(tester, 'Note only');
@@ -155,5 +163,84 @@ void main() {
 
     expect(find.textContaining('Name this item'), findsNothing);
     expect(find.text('Confirm 0 fact(s)'), findsOneWidget);
+  });
+
+  dateEditingTests();
+}
+
+// Dates and times are the reviewer's to correct. The extractor reads them out
+// of free text and gets them wrong often enough that a read-only display was a
+// dead end: the only options were accept a wrong date or discard the fact.
+void dateEditingTests() {
+  testWidgets('an appointment date, time and year can all be corrected',
+      (tester) async {
+    await pumpReview(tester, draft(facts: [appointmentFact]));
+
+    await tester.enterText(field('Date'), '21 October');
+    await tester.enterText(field('Time'), '11:30 AM');
+    await tester.enterText(field('Year'), '2026');
+    await tester.pumpAndSettle();
+
+    expect(fieldText(tester, 'Date'), '21 October');
+    expect(fieldText(tester, 'Time'), '11:30 AM');
+    expect(fieldText(tester, 'Year'), '2026');
+    expect(find.text('Confirm 1 fact(s)'), findsOneWidget);
+  });
+
+  testWidgets('a blank year is an explicit "unknown", not a gap', (tester) async {
+    await pumpReview(tester, draft(facts: [appointmentFact]));
+
+    expect(fieldText(tester, 'Year'), isEmpty);
+    expect(find.textContaining('Year unknown'), findsOneWidget);
+    // An appointment with no year is still saveable: the date and time are
+    // what make it real.
+    expect(find.text('Confirm 1 fact(s)'), findsOneWidget);
+  });
+
+  testWidgets('typing a year replaces the unknown note', (tester) async {
+    await pumpReview(tester, draft(facts: [appointmentFact]));
+
+    await tester.enterText(field('Year'), '2026');
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining('Year unknown'), findsNothing);
+    expect(find.textContaining('Year taken from the record'), findsOneWidget);
+  });
+
+  testWidgets('clearing the date blocks the appointment again', (tester) async {
+    await pumpReview(tester, draft(facts: [appointmentFact]));
+
+    await tester.enterText(field('Date'), '');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Confirm 0 fact(s)'), findsOneWidget);
+    expect(find.textContaining('No date and time'), findsOneWidget);
+  });
+
+  testWidgets('a receipt date can be corrected', (tester) async {
+    await pumpReview(tester, draft(facts: [requestFact]));
+    await switchTypeTo(tester, 'Receipt');
+
+    expect(fieldText(tester, 'Receipt date'), '2026-10-12',
+        reason: 'it starts from the record date');
+
+    await tester.enterText(field('Receipt date'), '2026-10-15');
+    await tester.pumpAndSettle();
+
+    expect(fieldText(tester, 'Receipt date'), '2026-10-15');
+    expect(find.text('Confirm 1 fact(s)'), findsOneWidget);
+  });
+
+  testWidgets('a date does not survive a switch to a type that has none',
+      (tester) async {
+    await pumpReview(tester, draft(facts: [appointmentFact]));
+    await tester.enterText(field('Date'), '21 October');
+    await tester.pumpAndSettle();
+
+    await switchTypeTo(tester, 'Note only');
+    await switchTypeTo(tester, 'Appointment');
+
+    expect(fieldText(tester, 'Date'), isEmpty,
+        reason: 'the date was read from the text and cannot be re-invented');
   });
 }

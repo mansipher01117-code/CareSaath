@@ -34,7 +34,9 @@ class _AskScreenState extends State<AskScreen> {
     _q.clear();
     try {
       final res = await Api.ask(profiles.selectedId!, q.trim(), _lang);
-      setState(() => _turns.add({'role': 'agent', ...res}));
+      // Stamp the data version the answer was read from, so it can say so
+      // later if the records move underneath it.
+      setState(() => _turns.add({'role': 'agent', 'asked_at_version': dataVersion.value, ...res}));
     } catch (e) {
       setState(() => _turns.add({'role': 'error', 'text': '$e'}));
     } finally {
@@ -147,7 +149,15 @@ class _AskScreenState extends State<AskScreen> {
     }
     return Padding(
       padding: const EdgeInsets.only(bottom: 14, right: 40),
-      child: AnswerCard(answer: t),
+      // Rebuilds when a record is confirmed anywhere in the app, so an answer
+      // read before that change can admit it.
+      child: ValueListenableBuilder<int>(
+        valueListenable: dataVersion,
+        builder: (context, version, _) => AnswerCard(
+          answer: t,
+          outdated: t['asked_at_version'] is int && version > (t['asked_at_version'] as int),
+        ),
+      ),
     );
   }
 }
@@ -190,7 +200,13 @@ class EngineBadge extends StatelessWidget {
 /// here is the honest outcome, not a rendering gap.
 class AnswerCard extends StatelessWidget {
   final Json answer;
-  const AnswerCard({super.key, required this.answer});
+
+  /// A record was confirmed after this answer was read, so what it says about
+  /// the graph may no longer hold. The answer is kept rather than hidden — it
+  /// was true when asked, and the sources still say what they said — but it
+  /// stops being presented as current.
+  final bool outdated;
+  const AnswerCard({super.key, required this.answer, this.outdated = false});
 
   List<Json> get _claims {
     final claims = answer['claims'];
@@ -220,8 +236,32 @@ class AnswerCard extends StatelessWidget {
           const SizedBox(width: 6),
           const Eyebrow('CareSaath', color: C.teal),
           const Spacer(),
+          if (outdated) ...[
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: C.marigoldSoft,
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: C.marigold),
+              ),
+              child: const Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.history_rounded, size: 11, color: C.marigold),
+                SizedBox(width: 4),
+                Text('May be outdated',
+                    style: TextStyle(
+                        fontSize: 10.5, fontWeight: FontWeight.w700, color: C.marigold)),
+              ]),
+            ),
+            const SizedBox(width: 6),
+          ],
           EngineBadge((answer['engine'] as String?) ?? 'rules'),
         ]),
+        if (outdated)
+          const Padding(
+            padding: EdgeInsets.only(top: 6),
+            child: Text('A record was confirmed after this answer. Ask again for the current one.',
+                style: TextStyle(color: C.marigold, fontSize: 12.5, height: 1.4)),
+          ),
         const SizedBox(height: 10),
         for (final claim in _claims) ...[
           Text(claim['text'] as String? ?? '',

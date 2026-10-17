@@ -74,6 +74,8 @@ def draft(monkeypatch):
         "status": "draft",
         "extractor": "rule-based-v1",
         "draft_facts": [],
+        "text": "Please bring the knee physio referral to the next appointment.\n\n"
+                "Appointment confirmed for 20 October at 10:00 AM.",
         "spans": [
             {"id": "R07-P1", "index": 1,
              "text": "Please bring the knee physio referral to the next appointment."},
