@@ -410,7 +410,17 @@ def _change_row(pid, rows):
     # Give every entry the real span that evidences it, so a reader cites
     # actual evidence instead of guessing at a span id.
     evidence = {}
+    # ...and the two ends of the story, so "why did this change?" can be
+    # answered from the change record alone: the request that started the item
+    # and the newest receipt that settled it. `_evidenced` already sorted both
+    # newest first, so the head of each list is the one that matters.
+    sides = {}
     for item in preparation(pid):
+        sides[item["id"]] = {
+            "requested_by": (item["requested_by"] or [None])[0],
+            "receipt": (item["receipts"] or [None])[0],
+            "path": item["path"],
+        }
         for x in item["receipts"] + item["requested_by"]:
             evidence.setdefault((item["id"], x["doc_id"]), x)
             evidence.setdefault((item["id"], None), x)
@@ -421,6 +431,7 @@ def _change_row(pid, rows):
             if hit:
                 entry["doc_id"] = hit["doc_id"]
                 entry["span_id"] = hit["span_id"]
+            entry.update(sides.get(entry.get("id")) or {})
     return r
 
 
