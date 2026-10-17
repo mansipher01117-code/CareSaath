@@ -21,7 +21,7 @@ import json
 from datetime import datetime, timezone
 
 from . import db
-from .extractor import normalize_key
+from .extractor import MONTH_NUMBERS, normalize_key
 
 
 def q(pid: str, cypher: str, params: dict | None = None):
@@ -199,12 +199,13 @@ def confirm_document(pid, doc_id, facts):
                 ON CREATE SET fu.item=$item, fu.label=$label
                 MERGE (p)-[:HAS_FOLLOWUP]->(fu)
                 MERGE (r:Receipt {id:$rid})
-                ON CREATE SET r.date=$date
+                ON CREATE SET r.date=$date, r.date_source=$date_source
                 MERGE (s)-[:DOCUMENTS_RECEIPT]->(r)
                 MERGE (r)-[:FULFILLS]->(fu)
                 """,
                 {"pid": pid, "sid": f["span_id"], "fid": fid, "item": key, "label": label,
-                 "rid": f"{fid}@{f['span_id']}", "date": f.get("date", "")},
+                 "rid": f"{fid}@{f['span_id']}", "date": f.get("date", ""),
+                 "date_source": f.get("date_source") or "document"},
             )
         elif t == "appointment":
             date, time = appointment_of(f)
@@ -273,7 +274,8 @@ OPTIONAL MATCH (f)<-[:FULFILLS]-(r:Receipt)<-[:DOCUMENTS_RECEIPT]-(es:EvidenceSp
                <-[:HAS_SPAN]-(ed:Document {status:'confirmed'})
 RETURN f.id AS id, f.item AS item, f.label AS label, requested_by,
        collect(DISTINCT {span_id:es.id, doc_id:ed.id, doc_title:ed.title,
-                         date:r.date, text:es.text}) AS receipts
+                         date:r.date, date_source:r.date_source,
+                         text:es.text}) AS receipts
 ORDER BY f.label
 """
 
@@ -327,9 +329,20 @@ def preparation_snapshot(pid):
     return {p["id"]: {"label": p["label"], "status": p["status"]} for p in preparation(pid)}
 
 
-MONTH_NUMBERS = {m: i for i, m in enumerate(
-    ["january", "february", "march", "april", "may", "june", "july", "august",
-     "september", "october", "november", "december"], start=1)}
+MONTH_NAMES = [m.title() for m in MONTH_NUMBERS]
+
+
+def pretty_date(iso: str) -> str:
+    """'2026-11-20' -> '20 Nov 2026'. Anything that is not an ISO date — a
+    blank, or a date somebody typed in their own words — is returned as it is
+    rather than reformatted into something the record never said."""
+    parts = (iso or "").split("-")
+    if len(parts) != 3 or not all(p.isdigit() for p in parts):
+        return iso or ""
+    y, m, d = (int(p) for p in parts)
+    if not 1 <= m <= 12:
+        return iso
+    return f"{d} {MONTH_NAMES[m - 1][:3]} {y:04d}"
 
 
 def iso_date(day_month: str, year: str) -> str:
@@ -487,7 +500,7 @@ def _node_label(n):
     if t == "FollowUp":
         return n.get("label", n["id"])
     if t == "Receipt":
-        return f"Receipt {n.get('date', '')}"
+        return f"Receipt {pretty_date(n.get('date', ''))}".strip()
     if t == "Appointment":
         return f"{n.get('date', '')} {n.get('time', '')}"
     if t == "EvidenceSpan":

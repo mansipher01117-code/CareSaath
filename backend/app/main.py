@@ -68,7 +68,10 @@ class ReceiptFact(FactIn):
     type: Literal["receipt"]
     label: str = Field(min_length=1, max_length=120)
     item: str = ""
+    # When the item was actually received, which is only the document's own
+    # date when the paragraph named no date at all.
     date: str = Field(default="", pattern=r"^(\d{4}-\d{2}-\d{2})?$")
+    date_source: Literal["sentence", "document", "edited"] = "document"
 
 
 class AppointmentFact(FactIn):

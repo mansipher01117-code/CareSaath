@@ -96,6 +96,22 @@ class TodayScreen extends StatelessWidget {
   }
 }
 
+/// "Receipt recorded 20 Nov 2026 · Clinic front-desk note".
+///
+/// The date is when the item was received, which the extractor reads from the
+/// sentence that records it. Only when that sentence named no date at all does
+/// the document's own date stand in, and then the line says so instead of
+/// letting the filing date pass for the event date.
+String receiptLine(Json receipt) {
+  final date = prettyDate('${receipt['date'] ?? ''}');
+  final title = '${receipt['doc_title'] ?? ''}'.trim();
+  final marked = receipt['date_source'] == 'document' ? '$date (document date)' : date;
+  return [
+    date.isEmpty ? 'Receipt recorded' : 'Receipt recorded $marked',
+    if (title.isNotEmpty) title,
+  ].join(' · ');
+}
+
 /// A recognisable icon for whatever the item turned out to be.
 IconData itemIcon(String key) {
   final k = key.toLowerCase();
@@ -212,7 +228,7 @@ class _PrepItem extends StatelessWidget {
         for (final r in req)
           _EvidenceLine(icon: Icons.assignment_outlined, text: 'Requested in ${r['doc_title']} · ${r['date']}', spanId: r['span_id'], docId: r['doc_id']),
         for (final r in rec)
-          _EvidenceLine(icon: Icons.inventory_2_outlined, text: 'Receipt recorded ${r['date']} · ${r['doc_title']}', spanId: r['span_id'], docId: r['doc_id']),
+          _EvidenceLine(icon: Icons.inventory_2_outlined, text: receiptLine(r), spanId: r['span_id'], docId: r['doc_id']),
         if (rec.isEmpty)
           const _EvidenceLine(icon: Icons.search_off_rounded, text: 'No receipt found in confirmed records — clarify at the visit'),
         const SizedBox(height: 10),

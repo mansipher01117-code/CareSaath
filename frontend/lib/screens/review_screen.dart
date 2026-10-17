@@ -50,7 +50,15 @@ class _ReviewScreenState extends State<ReviewScreen> {
   TextEditingController _dateField(int i, String key) =>
       _dates.putIfAbsent('$i.$key', () {
         final c = TextEditingController(text: '${facts[i][key] ?? ''}');
-        c.addListener(() => setState(() => facts[i][key] = c.text.trim()));
+        final suggested = c.text;
+        c.addListener(() => setState(() {
+              facts[i][key] = c.text.trim();
+              // A receipt date the reviewer typed is neither the paragraph's
+              // nor the document's, so it stops being labelled a fallback.
+              if (key == 'date' && facts[i]['type'] == 'receipt' && c.text != suggested) {
+                facts[i]['date_source'] = 'edited';
+              }
+            }));
         return c;
       });
 
@@ -94,7 +102,12 @@ class _ReviewScreenState extends State<ReviewScreen> {
     } else {
       next['label'] = _hasItem(oldType) ? labels[i].text.trim() : f['label'];
     }
-    if (newType == 'receipt') next['date'] = widget.draft['date'] ?? '';
+    if (newType == 'receipt') {
+      // Nothing was read from the paragraph for a fact the reviewer just
+      // turned into a receipt, so its date starts as the document's.
+      next['date'] = widget.draft['date'] ?? '';
+      next['date_source'] = 'document';
+    }
     if (newType == 'appointment' && oldType == 'appointment') {
       next['date'] = f['date'];
       next['time'] = f['time'];
@@ -337,7 +350,20 @@ class _ReviewScreenState extends State<ReviewScreen> {
             if (type == 'receipt')
               Padding(
                 padding: const EdgeInsets.only(left: 48, top: 4, bottom: 4),
-                child: _dateInput(i, 'date', 'Receipt date', 'YYYY-MM-DD, or blank if unknown'),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  _dateInput(i, 'date', 'Received on', 'YYYY-MM-DD, or blank if unknown'),
+                  const SizedBox(height: 4),
+                  // The day the item was received is not the day the note was
+                  // filed, so the card says which of the two this is.
+                  Text(
+                      f['date_source'] == 'document'
+                          ? 'This paragraph gives no date — the document date is standing in. '
+                              'Correct it if you know the day.'
+                          : f['date_source'] == 'edited'
+                              ? 'Your own date, not the record’s.'
+                              : 'Read from this paragraph: ${prettyDate('${f['date'] ?? ''}')}.',
+                      style: const TextStyle(color: C.muted, fontSize: 12, height: 1.3)),
+                ]),
               ),
             if (type == 'absence_note')
               Padding(

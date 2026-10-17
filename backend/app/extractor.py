@@ -83,6 +83,18 @@ NOT_AN_ITEM = {
 }
 
 MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
+MONTH_NUMBERS = {m.lower(): i for i, m in enumerate(MONTHS.split("|"), start=1)}
+
+# A calendar date written inside a sentence: "on 20 November 2026",
+# "November 20", "2026-11-20". The year is optional, because a clinic note
+# routinely says only the day and the month.
+SENTENCE_DATE_RE = re.compile(
+    rf"\b(?:(?P<iso>\d{{4}}-\d{{2}}-\d{{2}})"
+    rf"|(?P<day>\d{{1,2}})(?:st|nd|rd|th)?\s+(?P<month>{MONTHS})"
+    rf"|(?P<month2>{MONTHS})\s+(?P<day2>\d{{1,2}})(?:st|nd|rd|th)?)"
+    rf"\s*,?\s*(?P<year>\d{{4}})?\b",
+    re.I,
+)
 # The year is captured when the text gives one. A note that says "20 October"
 # and nothing else genuinely does not say which year, so the year is returned
 # empty rather than assumed to be this one — "20 October" in a December note
@@ -160,6 +172,28 @@ def split_sentences(paragraph: str) -> list[str]:
     return parts or [paragraph.strip()]
 
 
+def sentence_date(sentence: str, record_date: str) -> str:
+    """The calendar date a sentence names, as ``YYYY-MM-DD``, or "" for none.
+
+    A sentence that gives a day and month but no year is read against the
+    record's own year: "received on 20 November" in a 2026 note is 20 November
+    2026. The record date is never a *substitute* for a date the sentence does
+    give — that is what put a document's date on an event that happened on a
+    different day.
+    """
+    m = SENTENCE_DATE_RE.search(sentence or "")
+    if not m:
+        return ""
+    if m.group("iso"):
+        return m.group("iso")
+    day = int(m.group("day") or m.group("day2"))
+    month = MONTH_NUMBERS.get((m.group("month") or m.group("month2")).lower())
+    year = m.group("year") or (record_date or "")[:4]
+    if not (month and 1 <= day <= 31 and year.isdigit()):
+        return ""
+    return f"{int(year):04d}-{month:02d}-{day:02d}"
+
+
 def _first_match(paragraph: str, *regexes) -> str | None:
     for rx in regexes:
         m = rx.search(paragraph)
@@ -192,10 +226,16 @@ def extract(doc_id: str, text: str, record_date: str) -> dict:
                 sentence, RECEIPT_RE, HI_RECEIPT_RE, HINGLISH_RECEIPT_RE, ACTIVE_RECEIPT_RE
             )
             if receipt_obj and not negated:
+                # When the sentence says when the item was received, that is
+                # the receipt's event date; the document's own date only
+                # stands in when the sentence names no date at all, and says
+                # so rather than passing itself off as the event date.
+                on = sentence_date(sentence, record_date)
                 for key, label in items_from(receipt_obj):
                     facts.append({
                         "type": "receipt", "item": key, "label": label,
-                        "span_id": span_id, "date": record_date,
+                        "span_id": span_id, "date": on or record_date,
+                        "date_source": "sentence" if on else "document",
                     })
             request_obj = _first_match(
                 sentence, POLITE_REQUEST_RE, REQUEST_RE, HI_REQUEST_RE, HINGLISH_REQUEST_RE
