@@ -5,6 +5,7 @@ import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 import 'profiles_screen.dart';
+import 'visit_prep_screen.dart';
 
 class TodayScreen extends StatelessWidget {
   final VoidCallback onAsk;
@@ -31,6 +32,16 @@ class TodayScreen extends StatelessWidget {
 
         final left = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _Header(person: person),
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: () => Navigator.of(context)
+                  .push(MaterialPageRoute(builder: (_) => const VisitPrepScreen())),
+              icon: const Icon(Icons.print_outlined, size: 18),
+              label: const Text('Prepare for visit'),
+            ),
+          ),
           const SizedBox(height: 20),
           // The backend returns appointments soonest first; "Next" is only
           // honest about one that is still ahead.
