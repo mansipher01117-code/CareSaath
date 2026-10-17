@@ -6,9 +6,16 @@ uvicorn[standard]>=0.29,<1.0
 falkordb>=1.0,<2.0
 pydantic>=2.6,<3.0
 python-dotenv>=1.0,<2.0
-# The LLM that answers in the Ask screen. Without a key the agent falls back to
-# the deterministic rules engine, so this stays optional at runtime.
+# The LLM that answers in the Ask screen, and transcribes an uploaded photo or
+# scanned page. Without a key the agent falls back to the deterministic rules
+# engine, so this stays optional at runtime — an upload with no text layer is
+# then refused with a message instead of guessed at.
 google-genai>=1.0,<3.0
+
+# Uploaded records: the multipart form, and the text layer of a PDF that has
+# one (a PDF that does not is sent to Gemini instead).
+python-multipart>=0.0.9,<1.0
+pypdf>=4.0,<7.0
 
 # Running the tests (no API key needed — the Gemini client is mocked).
 pytest>=8.0,<10.0

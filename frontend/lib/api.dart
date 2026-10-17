@@ -84,6 +84,29 @@ class Api {
       await _send('DELETE', '/records/$id', personId: pid);
   static Future<Json> ask(String pid, String q, String lang) async =>
       await _send('POST', '/ask', personId: pid, body: {'question': q, 'lang': lang}) as Json;
+
+  /// Upload a PDF or photo as a record.
+  ///
+  /// The backend reads the text off the file and answers with the same
+  /// unconfirmed draft that pasted text produces, so both ways in reach the
+  /// Review screen through the same door.
+  static Future<Json> uploadRecord(
+      String pid, String title, String date, String filename, List<int> bytes) async {
+    try {
+      final req = http.MultipartRequest('POST', Uri.parse('$apiUrl/people/$pid/records/upload'))
+        ..fields['title'] = title
+        ..fields['date'] = date
+        ..files.add(http.MultipartFile.fromBytes('file', bytes, filename: filename));
+      // A scan has to be transcribed before it can come back, which takes
+      // longer than anything else the app waits on.
+      final streamed = await req.send().timeout(const Duration(seconds: 120));
+      return _decode(await http.Response.fromStream(streamed)) as Json;
+    } on ApiException {
+      rethrow;
+    } catch (_) {
+      throw ApiException(0, 'Backend not reachable at $apiUrl');
+    }
+  }
 }
 
 /// Bumped whenever graph data changes, so screens refetch.

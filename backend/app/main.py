@@ -8,11 +8,11 @@ Run:  uvicorn app.main:app --reload --port 8000
 import os
 from typing import Annotated, Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, TypeAdapter, ValidationError
 
-from . import agent, db, graph_ops as g, people
+from . import agent, db, graph_ops as g, ocr, people
 from .extractor import extract
 
 
@@ -197,6 +197,33 @@ def _preview(pid: str, rec: RecordIn):
 def preview(rec: RecordIn, pid: str = Pid):
     """Create an UNCONFIRMED draft + suggested facts. Nothing is used in answers yet."""
     return _preview(pid, rec)
+
+
+@app.post("/people/{pid}/records/upload")
+async def upload_record(
+    pid: str,
+    title: Annotated[str, Form(min_length=1, max_length=120)],
+    date: Annotated[str, Form(pattern=r"^\d{4}-\d{2}-\d{2}$")],
+    file: Annotated[UploadFile, File()],
+):
+    """Read a PDF or photo into text, then hand it to the ordinary preview flow.
+
+    Nothing is confirmed here and nothing new reaches the graph: the result is
+    the same unconfirmed draft that pasted text produces, so a transcription is
+    checked by a person on the Review screen before any of it becomes evidence.
+    """
+    _require_db()
+    if not people.get(pid):
+        raise HTTPException(404, f"No profile {pid!r}. Create one with POST /people.")
+    try:
+        text, how = ocr.text_from(file.filename or "", file.content_type or "",
+                                  await file.read())
+    except ocr.UploadProblem as e:
+        raise HTTPException(400, str(e)) from e
+    draft = _preview(pid, RecordIn(title=title.strip(), date=date, text=text))
+    # Which of the two read it, because a text layer is a machine reading and a
+    # transcription is a model's best effort — the reviewer should know which.
+    return {**draft, "read_by": how, "filename": file.filename or ""}
 
 
 FACT_TYPES = ("request", "receipt", "appointment", "absence_note")
