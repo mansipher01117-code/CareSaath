@@ -1,35 +1,171 @@
-"""CareSaath agent (v1: deterministic router over graph tools).
+"""CareSaath agent — a Gemini LLM with function calling over the person's graph.
 
-The agent picks graph tools based on the question, runs them against the
-selected person's graph in FalkorDB, and composes an answer ONLY from what the
-tools returned. Every answer carries its sources and a trace of tool calls, so
-the path behind the answer is visible.
+The model never sees the database. It sees four read-only tools, each already
+bound to the one person being asked about (`tools_for`), so a question asked
+about one family member cannot reach another's records. It chooses the tools,
+reads what they return, and writes the answer as structured *claims* — each
+claim carrying the (doc_id, span_id) pairs it rests on.
 
-Nothing here knows the name of any particular follow-up item: a question is
-matched against the items that actually exist in that person's graph.
+Grounding is enforced on this side of the wire, not asked for politely:
+`validate_sources()` builds the set of (doc_id, span_id) pairs the tools
+actually returned and drops every citation that is not in it. A model that
+invents a source ends up with a claim that has no evidence behind it, never
+with a fabricated chip in the UI.
 
-Upgrade path: replace `route()` with an LLM that chooses tools (function
-calling / MCP) and replace `compose()` with an LLM that writes the answer
-from the returned evidence. Keep `validate_sources()` so the model can never
-cite something the graph didn't return.
+If the key is missing, the API fails or is rate-limited, or the JSON comes back
+malformed, the deterministic rules agent answers instead and the response says
+so (`"engine": "rules"`). The rules engine is the original v1 agent and is kept
+whole: it is the floor the product never falls below.
 """
+from __future__ import annotations
+
+import json
+import os
+import re
+import time
+
 from . import graph_ops as g
 from .extractor import tokens
+
+DEFAULT_MODEL = "gemini-flash-latest"
+LLM_TIMEOUT_S = 20
+MAX_TOOL_TURNS = 6
+
+
+class LlmUnavailable(Exception):
+    """The LLM could not produce a usable grounded answer. Falls back to rules."""
+
+
+def _model() -> str:
+    """Read at call time, so .env and tests both get a say."""
+    return (os.getenv("GEMINI_MODEL") or "").strip() or DEFAULT_MODEL
+
 
 # ---------------- tools (names match the 03 — Tool Contract doc) ----------------
 
 def tools_for(pid: str) -> dict:
-    """Bind the graph tools to one person, so no tool can read another's data."""
+    """Bind the graph tools to one person, so no tool can read another's data.
+
+    All four are read-only and take no person argument: `pid` is closed over
+    here, before the model is ever asked anything.
+    """
     return {
         "retrieve_patient_context": lambda: {
             "person": g.person(pid), "appointments": g.appointments(pid)
         },
         "list_unresolved_followups": lambda: g.preparation(pid),
         "latest_change": lambda: g.latest_change(pid),
+        "inspect_source_span": lambda doc_id="", span_id="": inspect_source_span(
+            pid, doc_id, span_id
+        ),
     }
 
 
-# ---------------- routing ----------------
+def inspect_source_span(pid: str, doc_id: str, span_id: str) -> dict:
+    """The exact text of one citable paragraph.
+
+    Only from a *confirmed* document of this person: a draft is still under
+    review and must never reach an answer, and another person's documents live
+    in another graph entirely.
+    """
+    doc_id, span_id = (doc_id or "").strip(), (span_id or "").strip()
+    doc = g.get_document(pid, doc_id) if doc_id else None
+    if not doc or doc.get("status") != "confirmed":
+        return {"error": f"No confirmed document {doc_id!r} for this person."}
+    span = next((s for s in doc.get("spans") or [] if s.get("id") == span_id), None)
+    if not span:
+        return {"error": f"Document {doc_id} has no span {span_id!r}."}
+    return {"doc_id": doc["id"], "span_id": span["id"], "doc_title": doc["title"],
+            "date": doc["date"], "text": span["text"]}
+
+
+TOOL_DECLARATIONS = [
+    {
+        "name": "retrieve_patient_context",
+        "description": (
+            "The person (name, relation, caregiver, number of confirmed records) and "
+            "every confirmed appointment with the evidence that confirms it. "
+            "Start here when the question is about who this is or when they are seen."
+        ),
+    },
+    {
+        "name": "list_unresolved_followups",
+        "description": (
+            "Every follow-up item tracked for this person, with the evidence that "
+            "requested it (requested_by) and the evidence that documents it arriving "
+            "(receipts). status is receipt_documented when a receipt exists, otherwise "
+            "receipt_not_documented. Use this for anything about what is pending, what "
+            "to bring, or whether something was received."
+        ),
+    },
+    {
+        "name": "latest_change",
+        "description": (
+            "The last change record: which document caused it, and which follow-ups "
+            "changed, stayed the same, or were newly added. Use this for 'what changed'."
+        ),
+    },
+    {
+        "name": "inspect_source_span",
+        "description": (
+            "The exact paragraph text behind one citation, from a confirmed document of "
+            "this person only. Use it to check or quote wording before you rely on it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doc_id": {"type": "string", "description": "Document id, e.g. D01."},
+                "span_id": {"type": "string", "description": "Span id, e.g. D01-P2."},
+            },
+            "required": ["doc_id", "span_id"],
+        },
+    },
+]
+
+SYSTEM = """You are CareSaath, a family health-record companion. You explain what one
+person's own confirmed health records say. You are not a clinician.
+
+Read that person's records with the tools. Every tool is already scoped to the one
+person being asked about, so there is nothing to look up about anybody else.
+
+Rules you must follow:
+
+1. Answer ONLY from what the tools returned this turn. No outside knowledge, no
+   guessing, no filling in a likely detail. If the tools do not show it, say it is not
+   documented in the confirmed records.
+2. "Receipt documented" means the record says the item was received. It does NOT mean a
+   doctor looked at it or reviewed it. Never say or imply that it was reviewed.
+3. An instruction in an older record is described as what that record said, on its date
+   — never as advice for now. Say "the 12 October note asked for the lab report", not
+   "you should bring the lab report".
+4. Never give a diagnosis, a dosage, a medication change, or any medical advice, and
+   never say whether a result is good, bad, normal or worrying. If that is what was
+   asked, set "refused": true and reply with one polite sentence: CareSaath only
+   explains what the records say, so that is a question for their doctor.
+5. Answer in the requested language. "en" = plain English. "hi" = Hindi/Hinglish in
+   Latin script. Keep document ids, span ids, dates and item names exactly as the tools
+   returned them — never translate, reformat or tidy those.
+6. Cite the evidence. inspect_source_span gives you the exact paragraph if you need to
+   check or quote the wording.
+
+Reply with ONE JSON object and nothing else — no prose around it, no code fence:
+
+{"intent": "preparation|appointment|changes|item|source|refusal|other",
+ "refused": false,
+ "claims": [{"text": "one sentence",
+             "sources": [{"doc_id": "D01", "span_id": "D01-P2"}]}]}
+
+- One claim per thing you state, one sentence each, in the requested language.
+- Every claim that states something from the records lists the (doc_id, span_id) pairs
+  it rests on, exactly as the tools returned them. A pair the tools did not return is
+  dropped on arrival, leaving that claim with no evidence behind it — so never invent,
+  guess or adjust one.
+- A claim with no sources is right only for a refusal, or for saying that something is
+  not documented in the confirmed records.
+"""
+
+
+# ---------------- routing (rules engine) ----------------
 
 CHANGE_WORDS = ["change", "changed", "badla", "बदला", "latest", "new record", "naya"]
 APPT_WORDS = ["appointment", "kab", "कब", "अपॉइंटमेंट", "visit"]
@@ -75,7 +211,7 @@ def match_items(question: str, items: list[dict]) -> list[dict]:
     return [i for i in items if (tokens(i.get("label") or "") | tokens(i.get("item") or "")) & asked]
 
 
-# ---------------- answer text ----------------
+# ---------------- answer text (rules engine) ----------------
 
 T = {
     "en": {
@@ -123,88 +259,162 @@ def _src(span_id, doc_id):
     return {"span_id": span_id, "doc_id": doc_id}
 
 
-def compose(intent, results, lang, items=None):
+def _claim(text, sources=()):
+    return {"text": text, "sources": list(sources)}
+
+
+def _change_src(item: dict | None, doc_id: str) -> list[dict]:
+    """The span behind one changed follow-up, preferring the document that moved it."""
+    pool = [x for x in (item or {}).get("receipts", []) + (item or {}).get("requested_by", [])
+            if x.get("span_id") and x.get("doc_id")]
+    hit = next((x for x in pool if x["doc_id"] == doc_id), None) or (pool[0] if pool else None)
+    return [_src(hit["span_id"], hit["doc_id"])] if hit else []
+
+
+def compose(intent, results, lang, items=None) -> list[dict]:
+    """The rules answer, as claims that each carry their own sources."""
     t = T.get(lang, T["en"])
-    lines, sources = [], []
+    claims: list[dict] = []
 
     if intent == "changes":
         ch = results["latest_change"]
         if not ch:
-            return [t["no_change"]], []
-        lines.append(t["changed_hdr"].format(doc=ch["doc_id"], date=ch["doc_date"]))
+            return [_claim(t["no_change"])]
+        by_id = {i["id"]: i for i in results.get("list_unresolved_followups") or []}
+        claims.append(_claim(t["changed_hdr"].format(doc=ch["doc_id"], date=ch["doc_date"])))
         for c in ch["changed"]:
-            lines.append(t["changed"].format(label=c["label"], frm=t[c["from"]], to=t[c["to"]]))
+            claims.append(_claim(
+                t["changed"].format(label=c["label"], frm=t[c["from"]], to=t[c["to"]]),
+                _change_src(by_id.get(c["id"]), ch["doc_id"])))
         for c in ch["added"]:
-            lines.append(t["added"].format(label=c["label"], to=t[c["to"]]))
+            claims.append(_claim(t["added"].format(label=c["label"], to=t[c["to"]]),
+                                 _change_src(by_id.get(c["id"]), ch["doc_id"])))
         for c in ch["unchanged"]:
-            lines.append(t["unchanged"].format(label=c["label"], st=t[c["status"]]))
-        for item in results["list_unresolved_followups"]:
-            for r in item["receipts"]:
-                if r["doc_id"] == ch["doc_id"]:
-                    sources.append(_src(r["span_id"], r["doc_id"]))
-        return lines, sources
+            claims.append(_claim(t["unchanged"].format(label=c["label"], st=t[c["status"]]),
+                                 _change_src(by_id.get(c["id"]), ch["doc_id"])))
+        return claims
 
     if intent == "appointment":
         appts = results["retrieve_patient_context"]["appointments"]
         if not appts:
-            return [t["no_appt"]], []
+            return [_claim(t["no_appt"])]
         for a in appts:
             s = next((x for x in a["sources"] if x.get("span_id")), None)
-            lines.append(t["appt"].format(date=a["date"], time=a["time"], doc=s["doc_id"] if s else "?"))
-            if s:
-                sources.append(_src(s["span_id"], s["doc_id"]))
-        return lines, sources
+            claims.append(_claim(
+                t["appt"].format(date=a["date"], time=a["time"], doc=s["doc_id"] if s else "?"),
+                [_src(s["span_id"], s["doc_id"])] if s else []))
+        return claims
 
     if items is None:
         items = results["list_unresolved_followups"]
     if not items:
-        return [t["nothing"] if intent == "item" else t["no_items"]], []
+        return [_claim(t["nothing"] if intent == "item" else t["no_items"])]
 
     pending = []
     for i in items:
         for rq in i["requested_by"][:1]:
-            lines.append(t["requested"].format(label=i["label"], doc=rq["doc_id"], date=rq["date"]))
-            sources.append(_src(rq["span_id"], rq["doc_id"]))
+            claims.append(_claim(
+                t["requested"].format(label=i["label"], doc=rq["doc_id"], date=rq["date"]),
+                [_src(rq["span_id"], rq["doc_id"])]))
         if i["receipts"]:
             r = i["receipts"][0]
-            lines.append(t["documented"].format(label=i["label"], date=r["date"], doc=r["doc_id"]))
-            sources.append(_src(r["span_id"], r["doc_id"]))
+            claims.append(_claim(
+                t["documented"].format(label=i["label"], date=r["date"], doc=r["doc_id"]),
+                [_src(r["span_id"], r["doc_id"])]))
         else:
-            lines.append(t["not_documented"].format(label=i["label"]))
+            claims.append(_claim(t["not_documented"].format(label=i["label"])))
             pending.append(i["label"])
 
     if intent == "preparation":
         ctx = results["retrieve_patient_context"]
         for a in ctx["appointments"][:1]:
             s = next((x for x in a["sources"] if x.get("span_id")), None)
-            lines.insert(0, t["appt"].format(date=a["date"], time=a["time"], doc=s["doc_id"] if s else "?"))
-            if s:
-                sources.append(_src(s["span_id"], s["doc_id"]))
-        lines.append(t["clarify"].format(items=", ".join(pending)) if pending else t["all_done"])
+            claims.insert(0, _claim(
+                t["appt"].format(date=a["date"], time=a["time"], doc=s["doc_id"] if s else "?"),
+                [_src(s["span_id"], s["doc_id"])] if s else []))
+        claims.append(_claim(
+            t["clarify"].format(items=", ".join(pending)) if pending else t["all_done"]))
     if any(i["receipts"] for i in items):
-        lines.append(t["note"])
-    return lines, sources
+        claims.append(_claim(t["note"]))
+    return claims
 
 
-def validate_sources(sources, results):
-    """Keep only sources that came out of tool results (guards future LLM output)."""
-    blob = str(results)
-    seen, out = set(), []
-    for s in sources:
-        key = (s["span_id"], s["doc_id"])
-        if s["span_id"] in blob and key not in seen:
-            seen.add(key)
-            out.append(s)
+# ---------------- grounding ----------------
+
+def evidence_pairs(obj, out: set | None = None) -> set:
+    """Every (doc_id, span_id) pair the tools actually returned.
+
+    Walks the raw tool results, so it does not matter which tool produced a
+    citation or how deeply nested it was. A tool's *error* message carries no
+    doc_id/span_id keys, so quoting an id back in an error can never make that
+    id citable.
+    """
+    if out is None:
+        out = set()
+    if isinstance(obj, dict):
+        d, s = obj.get("doc_id"), obj.get("span_id")
+        if isinstance(d, str) and isinstance(s, str) and d and s:
+            out.add((d, s))
+        for v in obj.values():
+            evidence_pairs(v, out)
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            evidence_pairs(v, out)
     return out
 
 
-def ask(pid: str, question: str, lang: str = "en"):
+def validate_sources(sources, results):
+    """Keep only citations the tools returned — the guard on the LLM's output."""
+    allowed = evidence_pairs(results)
+    seen, out = set(), []
+    for s in sources or []:
+        if not isinstance(s, dict):
+            continue
+        key = (str(s.get("doc_id") or ""), str(s.get("span_id") or ""))
+        if key in allowed and key not in seen:
+            seen.add(key)
+            out.append({"span_id": key[1], "doc_id": key[0]})
+    return out
+
+
+def _enrich(pid, s, cache):
+    """Attach the paragraph text and document title the UI shows on a chip."""
+    doc_id = s["doc_id"]
+    if doc_id not in cache:
+        cache[doc_id] = g.get_document(pid, doc_id)
+    doc = cache[doc_id] or {}
+    span = next((x for x in doc.get("spans") or [] if x.get("id") == s["span_id"]), None)
+    return {**s, "text": span["text"] if span else "",
+            "doc_title": doc.get("title") or "", "date": doc.get("date") or ""}
+
+
+def _respond(pid, question, lang, intent, engine, claims, results, trace, matched_items=()):
+    """The one place the response contract is built, for both engines."""
+    cache: dict = {}
+    out_claims, top, seen = [], [], set()
+    for c in claims:
+        srcs = [_enrich(pid, s, cache) for s in validate_sources(c.get("sources"), results)]
+        out_claims.append({"text": c["text"], "sources": srcs})
+        for s in srcs:
+            key = (s["doc_id"], s["span_id"])
+            if key not in seen:
+                seen.add(key)
+                top.append(s)
+    return {"question": question, "lang": lang, "intent": intent, "engine": engine,
+            "answer": [c["text"] for c in out_claims], "claims": out_claims,
+            "sources": top, "trace": trace, "matched_items": list(matched_items)}
+
+
+# ---------------- rules engine ----------------
+
+def rules_ask(pid: str, question: str, lang: str = "en", note: dict | None = None):
     tools = tools_for(pid)
     intent, tool_names = route(question)
-    results, trace = {}, []
+    results: dict = {}
+    trace = [note] if note else []
     for name in tool_names:
         results[name] = tools[name]()
-        trace.append({"tool": name, "returned": _summarize(results[name])})
+        trace.append({"tool": name, "args": {}, "returned": _summarize(results[name])})
 
     items = None
     if intent == "preparation":
@@ -212,23 +422,155 @@ def ask(pid: str, question: str, lang: str = "en"):
         if matched:
             intent, items = "item", matched
 
-    lines, sources = compose(intent, results, lang, items)
-    sources = validate_sources(sources, results)
-    # attach source text for the UI
-    for s in sources:
-        doc = g.get_document(pid, s["doc_id"])
-        span = next((x for x in (doc or {}).get("spans", []) if x["id"] == s["span_id"]), None)
-        s["text"] = span["text"] if span else ""
-        s["doc_title"] = doc["title"] if doc else ""
-        s["date"] = doc["date"] if doc else ""
-    return {"question": question, "lang": lang, "intent": intent, "answer": lines,
-            "sources": sources, "trace": trace,
-            "matched_items": [i["id"] for i in items] if items else []}
+    claims = compose(intent, results, lang, items)
+    return _respond(pid, question, lang, intent, "rules", claims, results, trace,
+                    [i["id"] for i in items] if items else [])
+
+
+# ---------------- LLM engine ----------------
+
+def _client():
+    """A Gemini client, or LlmUnavailable. The SDK is imported lazily, so the
+    rules engine still answers on a machine where it was never installed."""
+    key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    if not key:
+        raise LlmUnavailable("GEMINI_API_KEY is not set")
+    try:
+        from google import genai
+    except ImportError as e:  # pragma: no cover - depends on the install
+        raise LlmUnavailable(f"google-genai is not installed ({e})") from e
+    return genai.Client(api_key=key, http_options={"timeout": LLM_TIMEOUT_S * 1000})
+
+
+def _function_calls(resp) -> list:
+    out = []
+    for cand in getattr(resp, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            fc = getattr(part, "function_call", None)
+            if fc is not None and getattr(fc, "name", None):
+                out.append(fc)
+    return out
+
+
+def _response_text(resp) -> str:
+    text = getattr(resp, "text", None)
+    if text:
+        return text
+    chunks = []
+    for cand in getattr(resp, "candidates", None) or []:
+        content = getattr(cand, "content", None)
+        for part in getattr(content, "parts", None) or []:
+            if getattr(part, "text", None):
+                chunks.append(part.text)
+    return "\n".join(chunks)
+
+
+def _parse_json(text: str) -> dict:
+    s = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.I).strip()
+    i, j = s.find("{"), s.rfind("}")
+    if i < 0 or j <= i:
+        raise LlmUnavailable("model did not return a JSON object")
+    try:
+        data = json.loads(s[i:j + 1])
+    except json.JSONDecodeError as e:
+        raise LlmUnavailable(f"invalid JSON from model: {e}") from e
+    if not isinstance(data, dict):
+        raise LlmUnavailable("model returned JSON that is not an object")
+    return data
+
+
+def _claims_from(data: dict) -> tuple[list[dict], str]:
+    raw = data.get("claims")
+    if not isinstance(raw, list) or not raw:
+        raise LlmUnavailable("model returned no claims")
+    claims = []
+    for c in raw:
+        if not isinstance(c, dict):
+            raise LlmUnavailable("model returned a malformed claim")
+        text = str(c.get("text") or "").strip()
+        if not text:
+            continue
+        srcs = c.get("sources")
+        claims.append({"text": text, "sources": srcs if isinstance(srcs, list) else []})
+    if not claims:
+        raise LlmUnavailable("model returned claims with no text")
+    intent = data.get("intent")
+    intent = intent.strip() if isinstance(intent, str) and intent.strip() else "other"
+    return claims, ("refusal" if data.get("refused") else intent)
+
+
+def llm_ask(pid: str, question: str, lang: str):
+    """One tool-calling conversation, bounded in turns and wall-clock time."""
+    client = _client()
+    tools = tools_for(pid)
+    deadline = time.monotonic() + LLM_TIMEOUT_S
+    contents: list = [{"role": "user", "parts": [{"text": f"lang: {lang}\nquestion: {question}"}]}]
+    config = {
+        "system_instruction": SYSTEM,
+        "tools": [{"function_declarations": TOOL_DECLARATIONS}],
+        "automatic_function_calling": {"disable": True},
+        "temperature": 0,
+    }
+    evidence: list = []   # every tool result, verbatim — what citations are checked against
+    trace: list = []
+
+    for _ in range(MAX_TOOL_TURNS):
+        if time.monotonic() > deadline:
+            raise LlmUnavailable(f"gave up after {LLM_TIMEOUT_S}s")
+        resp = client.models.generate_content(model=_model(), contents=contents, config=config)
+        calls = _function_calls(resp)
+        if not calls:
+            claims, intent = _claims_from(_parse_json(_response_text(resp)))
+            return _respond(pid, question, lang, intent, "llm", claims, evidence, trace)
+
+        contents.append(resp.candidates[0].content)
+        parts = []
+        for call in calls:
+            name = getattr(call, "name", "") or ""
+            args = dict(getattr(call, "args", None) or {})
+            if name not in tools:
+                result = {"error": f"Unknown tool {name!r}."}
+            else:
+                try:
+                    result = tools[name](**args)
+                except TypeError as e:
+                    result = {"error": f"Bad arguments for {name}: {e}"}
+            evidence.append({"tool": name, "args": args, "result": result})
+            trace.append({"tool": name, "args": args, "returned": _summarize(result)})
+            parts.append({"function_response": {"name": name, "response": {"result": result}}})
+        contents.append({"role": "tool", "parts": parts})
+
+    raise LlmUnavailable(f"no answer after {MAX_TOOL_TURNS} tool turns")
+
+
+# ---------------- entry point ----------------
+
+def ask(pid: str, question: str, lang: str = "en"):
+    """Answer with the LLM; fall back to the rules engine and say which answered."""
+    lang = lang if lang in T else "en"
+    try:
+        return llm_ask(pid, question, lang)
+    except Exception as e:  # any LLM failure is a fallback, never a failed request
+        note = {"tool": "gemini", "args": {"model": _model()},
+                "returned": f"unavailable, answered with rules instead ({_scrub(e)})"}
+        return rules_ask(pid, question, lang, note)
+
+
+def _scrub(err) -> str:
+    """An error message for the trace, with the API key never in it."""
+    msg = " ".join(str(err).split())[:300] or err.__class__.__name__
+    key = (os.getenv("GEMINI_API_KEY") or "").strip()
+    return msg.replace(key, "***") if len(key) > 8 else msg
 
 
 def _summarize(v):
     if isinstance(v, list):
         return f"{len(v)} item(s)"
     if isinstance(v, dict):
+        if v.get("error"):
+            return f"error: {v['error']}"
+        if v.get("span_id"):
+            return f"{v['span_id']}, {len(v.get('text') or '')} chars"
         return ", ".join(v.keys())
     return "none" if v is None else str(v)[:60]

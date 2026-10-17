@@ -36,8 +36,12 @@ docker compose up -d
 cd backend
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
+cp .env.example .env     # then put a free Gemini key in GEMINI_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```
+The key is optional: without it the agent answers from the deterministic rules
+engine instead and says so (`"engine": "rules"`). Get one free at
+<https://aistudio.google.com/apikey>. `.env` is gitignored.
 Nothing is seeded — the app starts empty and you create the first profile in the
 UI. Check http://localhost:8000/health and http://localhost:8000/docs.
 
@@ -69,8 +73,10 @@ and add `android:usesCleartextTraffic="true"` to the `<application>` tag in
    different paragraph, or uncheck it. Only what you confirm reaches the graph.
 4. **Today** — the appointment and every follow-up, each with the evidence
    behind its status and the graph path that derived it.
-5. **Ask** — questions in English or Hindi/Hinglish, answered only from that
-   person's confirmed records, with sources and the agent's tool trace.
+5. **Ask** — any question, in English or Hindi/Hinglish, answered only from that
+   person's confirmed records, with a source under each claim and the agent's tool
+   trace. The badge on an answer says who wrote it: **AI** (Gemini chose the tools
+   and phrased the answer) or **Rules** (the deterministic fallback).
 6. **Graph** — that person's live subgraph; tap a document or span for the
    original text.
 
@@ -124,13 +130,13 @@ parameter, and returns 404 if no such profile exists.
 | GET | /preparation | follow-ups with derived status, sources, graph path |
 | GET | /changes/latest | last change (changed / unchanged / added) |
 | GET | /graph | subgraph for the graph view |
-| POST | /ask | agent answer `{answer, sources, trace}` (lang: en/hi) |
+| POST | /ask | agent answer `{answer, claims, sources, trace, intent, engine}` (lang: en/hi) |
 
 ## Where to add features next
 
 | Feature | Where |
 |---|---|
-| LLM answers (Claude/Gemini/etc.) | `agent.py` → swap `route()` for tool-calling, `compose()` for generation; keep `validate_sources()` |
+| Another model (Claude, a local one) | `agent.py` → `_client()` + `llm_ask()`; the tools, the claim contract and `validate_sources()` stay as they are |
 | PDF / image + OCR | new `POST /records/upload` → text → same `extract()` → same review flow |
 | Better extraction | replace `extractor.extract()` (keep the returned shape) |
 | More languages (bn, mr, ta, te) | add to `T` in `agent.py` + `_langs` in `ask_screen.dart` (or Sarvam translate) |
@@ -142,7 +148,9 @@ parameter, and returns 404 if no such profile exists.
 
 - Extraction is rule-based: it reads request/receipt phrasings out of the text,
   so it will over- and under-match. Human review is the safety net.
-- Agent routing and answer text are deterministic templates; no LLM yet.
+- The LLM is free-tier Gemini Flash: on a rate limit, a timeout (20s) or malformed
+  JSON the answer silently drops to the rules engine, which is more rigid and only
+  routes to three of the four tools.
 - English + Hindi/Hinglish answers only; UI chrome is English.
 - Text entry only; no file upload yet.
 - **No auth.** Every profile on the server is visible to anyone who can reach
