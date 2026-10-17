@@ -445,7 +445,10 @@ def _respond(pid, question, lang, intent, engine, claims, results, trace, matche
                 top.append(s)
     return {"question": question, "lang": lang, "intent": intent, "engine": engine,
             "answer": [c["text"] for c in out_claims], "claims": out_claims,
-            "sources": top, "trace": trace, "matched_items": list(matched_items)}
+            "sources": top, "trace": trace, "matched_items": list(matched_items),
+            # The slice of the graph this answer rests on, so the Graph screen
+            # can show the reader the same path the answer walked.
+            "path": g.answer_path(pid, top)}
 
 
 # ---------------- rules engine ----------------
@@ -488,6 +491,13 @@ def _client():
     except ImportError as e:  # pragma: no cover - depends on the install
         raise LlmUnavailable(f"google-genai is not installed ({e})") from e
     return genai.Client(api_key=key, http_options={"timeout": LLM_TIMEOUT_S * 1000})
+
+
+def _genai_types():
+    """The SDK's content types, imported as lazily as the client itself so the
+    rules engine still answers where google-genai was never installed."""
+    from google.genai import types
+    return types
 
 
 def _function_calls(resp) -> list:
@@ -551,6 +561,7 @@ def _claims_from(data: dict) -> tuple[list[dict], str]:
 def llm_ask(pid: str, question: str, lang: str):
     """One tool-calling conversation, bounded in turns and wall-clock time."""
     client = _client()
+    types = _genai_types()
     tools = tools_for(pid)
     deadline = time.monotonic() + LLM_TIMEOUT_S
     contents: list = [{"role": "user", "parts": [{"text": f"lang: {lang}\nquestion: {question}"}]}]
@@ -572,7 +583,13 @@ def llm_ask(pid: str, question: str, lang: str):
             claims, intent = _claims_from(_parse_json(_response_text(resp)))
             return _respond(pid, question, lang, intent, "llm", claims, evidence, trace)
 
-        contents.append(resp.candidates[0].content)
+        # The turn that asked for the tools goes back as the model's own.
+        # Gemini accepts only SYSTEM, USER and MODEL: a "tool" or "function"
+        # role is rejected outright with 400 INVALID_ARGUMENT, which is how
+        # every tool-calling answer used to end up on the rules engine.
+        said = resp.candidates[0].content
+        contents.append(types.Content(role="model",
+                                      parts=list(getattr(said, "parts", None) or [])))
         parts = []
         for call in calls:
             name = getattr(call, "name", "") or ""
@@ -586,8 +603,11 @@ def llm_ask(pid: str, question: str, lang: str):
                     result = {"error": f"Bad arguments for {name}: {e}"}
             evidence.append({"tool": name, "args": args, "result": result})
             trace.append({"tool": name, "args": args, "returned": _summarize(result)})
-            parts.append({"function_response": {"name": name, "response": {"result": result}}})
-        contents.append({"role": "tool", "parts": parts})
+            parts.append(types.Part.from_function_response(name=name,
+                                                           response={"result": result}))
+        # Function results are the user's half of the conversation, not a role
+        # of their own.
+        contents.append(types.Content(role="user", parts=parts))
 
     raise LlmUnavailable(f"no answer after {MAX_TOOL_TURNS} tool turns")
 
@@ -601,15 +621,26 @@ def ask(pid: str, question: str, lang: str = "en"):
         return llm_ask(pid, question, lang)
     except Exception as e:  # any LLM failure is a fallback, never a failed request
         note = {"tool": "gemini", "args": {"model": _model()},
-                "returned": f"unavailable, answered with rules instead ({_scrub(e)})"}
+                "returned": f"Gemini unavailable: {_scrub(e)} — answered with rules instead"}
         return rules_ask(pid, question, lang, note)
 
 
+# A google-genai failure arrives as a status line with the whole response body
+# behind it: "400 INVALID_ARGUMENT. {'error': {'code': 400, 'message': ...}}".
+# Only the status line is worth reading, so the trace keeps that and drops the
+# JSON — a caregiver looking at why an answer came from the rules engine should
+# not be handed an API payload.
+API_STATUS_RE = re.compile(r"\b(\d{3})\s+([A-Z][A-Z0-9_]{3,})\b")
+
+
 def _scrub(err) -> str:
-    """An error message for the trace, with the API key never in it."""
-    msg = " ".join(str(err).split())[:300] or err.__class__.__name__
+    """A short reason for the trace, with the API key never in it."""
+    msg = " ".join(str(err).split()) or err.__class__.__name__
+    m = API_STATUS_RE.search(msg)
+    short = f"{m.group(1)} {m.group(2)}" if m else msg.split("{")[0].strip(" .:,")
+    short = short[:120] or err.__class__.__name__
     key = (os.getenv("GEMINI_API_KEY") or "").strip()
-    return msg.replace(key, "***") if len(key) > 8 else msg
+    return short.replace(key, "***") if len(key) > 8 else short
 
 
 def _summarize(v):

@@ -1,3 +1,4 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../api.dart';
@@ -18,6 +19,13 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
   bool _busy = false;
   String? _error;
 
+  /// The file being read, while it is being read. A scan goes to Gemini to be
+  /// transcribed, so this is the one wait in the app worth narrating.
+  String? _reading;
+
+  /// What can be read: a text PDF directly, anything else off the picture.
+  static const _extensions = ['pdf', 'jpg', 'jpeg', 'png', 'webp', 'heic', 'heif'];
+
   String get _iso =>
       '${_date.year.toString().padLeft(4, '0')}-${_date.month.toString().padLeft(2, '0')}-${_date.day.toString().padLeft(2, '0')}';
 
@@ -26,13 +34,46 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
       setState(() => _error = 'Add a title and the record text.');
       return;
     }
+    await _draft(() => Api.preview(
+        profiles.selectedId!, _title.text.trim(), _iso, _text.text.trim()));
+  }
+
+  /// Pick a PDF or a photo and let the backend read the text off it. The
+  /// result is the same draft a paste produces, so it goes to the same place.
+  Future<void> _upload() async {
+    final file = await FilePicker.pickFile(
+      dialogTitle: 'Choose a record to read',
+      type: FileType.custom,
+      allowedExtensions: _extensions,
+    );
+    if (file == null) return;  // the picker was cancelled
+    // file_picker 13 reads bytes on demand instead of up front, which is also
+    // the only way to get them on the web.
+    final bytes = await file.readAsBytes();
+    if (bytes.isEmpty) {
+      setState(() => _error = '${file.name} came back empty. Try picking it again.');
+      return;
+    }
+    // A record needs a title and the file already has a name, so an untitled
+    // upload is titled after the file rather than refused for it.
+    final title = _title.text.trim().isEmpty
+        ? file.name.replaceAll(RegExp(r'\.[A-Za-z0-9]{1,5}$'), '')
+        : _title.text.trim();
+    setState(() => _reading = file.name);
+    await _draft(() =>
+        Api.uploadRecord(profiles.selectedId!, title, _iso, file.name, bytes));
+    if (mounted) setState(() => _reading = null);
+  }
+
+  /// One way to the Review screen, whether the text was pasted or read off a
+  /// file: the same duplicate check, the same errors, the same next screen.
+  Future<void> _draft(Future<Json> Function() make) async {
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      final draft = await Api.preview(
-          profiles.selectedId!, _title.text.trim(), _iso, _text.text.trim());
+      final draft = await make();
       if (!mounted) return;
       if (draft['duplicate_of'] != null) {
         setState(() => _error = 'This record is already confirmed as ${draft['duplicate_of']}. No duplicate facts were created.');
@@ -86,12 +127,27 @@ class _AddRecordScreenState extends State<AddRecordScreen> {
                   hintText: 'Paste the note. Leave a blank line between paragraphs — each paragraph becomes a citable source.',
                 ),
               ),
-              const SizedBox(height: 10),
-              const Row(children: [
-                Icon(Icons.upload_file_outlined, size: 16, color: C.muted),
-                SizedBox(width: 6),
-                Text('PDF / photo upload with OCR — coming next', style: TextStyle(color: C.muted, fontSize: 13)),
+              const SizedBox(height: 14),
+              Row(children: [
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _upload,
+                  icon: const Icon(Icons.upload_file_outlined, size: 18),
+                  label: const Text('Upload PDF / photo'),
+                ),
+                const SizedBox(width: 12),
+                const Expanded(
+                  child: Text('A PDF with a text layer is read directly; a photo or a scan '
+                      'is transcribed, and you check it on the next screen.',
+                      style: TextStyle(color: C.muted, fontSize: 12.5, height: 1.4)),
+                ),
               ]),
+              if (_reading != null) ...[
+                const SizedBox(height: 12),
+                const LinearProgressIndicator(color: C.teal),
+                const SizedBox(height: 6),
+                Text('Reading $_reading…',
+                    style: const TextStyle(color: C.muted, fontSize: 13)),
+              ],
               if (_error != null) ...[
                 const SizedBox(height: 16),
                 Text(_error!, style: const TextStyle(color: C.rose, fontWeight: FontWeight.w600)),

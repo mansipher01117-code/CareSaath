@@ -6,7 +6,9 @@ import '../theme.dart';
 import '../widgets/common.dart';
 
 class AskScreen extends StatefulWidget {
-  const AskScreen({super.key});
+  /// Switches the shell to the Graph tab, so an answer can show its own path.
+  final VoidCallback onShowGraph;
+  const AskScreen({super.key, required this.onShowGraph});
   @override
   State<AskScreen> createState() => _AskScreenState();
 }
@@ -156,6 +158,7 @@ class _AskScreenState extends State<AskScreen> {
         builder: (context, version, _) => AnswerCard(
           answer: t,
           outdated: t['asked_at_version'] is int && version > (t['asked_at_version'] as int),
+          onShowInGraph: widget.onShowGraph,
         ),
       ),
     );
@@ -206,7 +209,20 @@ class AnswerCard extends StatelessWidget {
   /// was true when asked, and the sources still say what they said — but it
   /// stops being presented as current.
   final bool outdated;
-  const AnswerCard({super.key, required this.answer, this.outdated = false});
+
+  /// Switches to the Graph tab. Null where there is no tab to switch to — a
+  /// card rendered on its own then simply offers no button.
+  final VoidCallback? onShowInGraph;
+  const AnswerCard({super.key, required this.answer, this.outdated = false, this.onShowInGraph});
+
+  /// The graph slice behind this answer, or null when it cites nothing the
+  /// graph holds — a refusal, or an answer whose citations were all dropped.
+  Json? get _path {
+    final p = answer['path'];
+    if (p is! Map) return null;
+    final nodes = (p['nodes'] as List?) ?? const [];
+    return nodes.isEmpty ? null : Json.from(p);
+  }
 
   List<Json> get _claims {
     final claims = answer['claims'];
@@ -229,6 +245,7 @@ class AnswerCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final trace = (answer['trace'] as List? ?? const []).cast<Json>();
+    final path = _path;
     return Panel(
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         Row(children: [
@@ -283,6 +300,21 @@ class AnswerCard extends StatelessWidget {
             ),
           const SizedBox(height: 10),
         ],
+        if (path != null && onShowInGraph != null)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              // The chips say which paragraphs back the answer; this shows the
+              // same evidence as the path the graph actually holds.
+              onPressed: () {
+                graphHighlight.value = path;
+                onShowInGraph!();
+              },
+              icon: const Icon(Icons.hub_outlined, size: 17),
+              label: const Text('Show in graph'),
+              style: TextButton.styleFrom(foregroundColor: C.plum),
+            ),
+          ),
         // The Panel paints its own background, which would otherwise swallow the
         // tile's ink splash — so the tile gets a Material of its own.
         Material(

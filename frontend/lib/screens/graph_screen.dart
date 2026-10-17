@@ -15,10 +15,30 @@ class GraphScreen extends StatelessWidget {
   static const _cols = {'Person': 0, 'Document': 1, 'EvidenceSpan': 2, 'FollowUp': 3, 'Appointment': 3, 'Receipt': 4};
   static const _w = 236.0, _h = 46.0, _gapX = 64.0, _gapY = 22.0, _pad = 40.0;
 
+  /// "source→target" for one edge, so a highlighted edge can be looked up
+  /// without comparing lists.
+  static String edgeKey(Object? a, Object? b) => '$a→$b';
+
   @override
   Widget build(BuildContext context) {
     final pid = profiles.selectedId;
     if (pid == null) return const SizedBox.shrink();
+    // The slice of the graph the last Ask answer rests on, when the reader
+    // asked to see it.
+    return ValueListenableBuilder<Json?>(
+      valueListenable: graphHighlight,
+      builder: (context, highlight, _) => _build(context, pid, highlight),
+    );
+  }
+
+  Widget _build(BuildContext context, String pid, Json? highlight) {
+    final onPath = {
+      for (final id in (highlight?['nodes'] as List? ?? const [])) '$id',
+    };
+    final pathEdges = {
+      for (final e in (highlight?['edges'] as List? ?? const []))
+        if (e is List && e.length >= 2) edgeKey(e[0], e[1]),
+    };
     return Loader<Json>(
       load: () => Api.graph(pid),
       builder: (context, g) {
@@ -50,6 +70,28 @@ class GraphScreen extends StatelessWidget {
               Text('${nodes.length} nodes · ${edges.length} relationships · live from person_$pid. '
                   'Tap a document or span to open the source.',
                   style: const TextStyle(color: C.muted)),
+              if (onPath.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                // Everything off the path is dimmed rather than removed: the
+                // reader is being shown where one answer sits in the whole
+                // graph, not handed a smaller graph.
+                Row(children: [
+                  const Icon(Icons.auto_awesome_rounded, size: 15, color: C.plum),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                        '${onPath.length} node(s) behind the last answer are highlighted; '
+                        'the rest of the graph is dimmed.',
+                        style: const TextStyle(color: C.plum, fontSize: 13)),
+                  ),
+                  TextButton.icon(
+                    onPressed: clearGraphHighlight,
+                    icon: const Icon(Icons.close_rounded, size: 16),
+                    label: const Text('Clear highlight'),
+                    style: TextButton.styleFrom(foregroundColor: C.plum),
+                  ),
+                ]),
+              ],
               const SizedBox(height: 12),
               Wrap(spacing: 14, runSpacing: 6, children: [
                 for (final t in ['Person', 'Document', 'EvidenceSpan', 'FollowUp', 'Appointment', 'Receipt'])
@@ -89,9 +131,16 @@ class GraphScreen extends StatelessWidget {
                 width: width,
                 height: height,
                 child: Stack(children: [
+
                   // The first child of the Stack, so every edge is drawn
                   // behind the boxes instead of across their labels.
                   CustomPaint(size: Size(width, height), painter: _EdgePainter(edges, pos, const Size(_w, _h))),
+
+                  CustomPaint(
+                      size: Size(width, height),
+                      painter: _EdgePainter(
+                          edges, pos, const Size(_w, _h), pathEdges, onPath.isNotEmpty)),
+
                   for (final n in nodes)
                     if (pos[n['id']] != null)
                       Positioned(
@@ -99,7 +148,10 @@ class GraphScreen extends StatelessWidget {
                         top: pos[n['id']]!.dy,
                         width: _w,
                         height: _h,
-                        child: _NodeBox(node: n),
+                        child: _NodeBox(
+                            node: n,
+                            onPath: onPath.contains('${n['id']}'),
+                            dimmed: onPath.isNotEmpty && !onPath.contains('${n['id']}')),
                       ),
                 ]),
               ),
@@ -113,7 +165,12 @@ class GraphScreen extends StatelessWidget {
 
 class _NodeBox extends StatelessWidget {
   final Json node;
-  const _NodeBox({required this.node});
+
+  /// On the highlighted answer path, or pushed into the background because
+  /// some other part of the graph is.
+  final bool onPath;
+  final bool dimmed;
+  const _NodeBox({required this.node, this.onPath = false, this.dimmed = false});
 
   @override
   Widget build(BuildContext context) {
@@ -121,6 +178,7 @@ class _NodeBox extends StatelessWidget {
     final color = nodeColor(type);
     final label = '${node['label'] ?? ''}';
     final tappable = type == 'Document' || type == 'EvidenceSpan';
+
     return Tooltip(
       // A box can only be so wide, so the full title — "D02 · Clinic
       // front-desk note" — stays readable on hover however long it is.
@@ -139,6 +197,33 @@ class _NodeBox extends StatelessWidget {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
               border: Border.all(color: color.withValues(alpha: 0.5), width: 1.4),
+
+    return Opacity(
+      opacity: dimmed ? 0.3 : 1,
+      child: Material(
+      color: onPath ? C.plumSoft : C.card,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: tappable
+            ? () => showSource(context, type == 'Document' ? node['id'] : node['doc_id'], type == 'EvidenceSpan' ? node['id'] : '')
+            : null,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+                color: color.withValues(alpha: onPath ? 1 : 0.5), width: onPath ? 2.6 : 1.4),
+          ),
+          child: Row(children: [
+            Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                Text(type, style: TextStyle(fontSize: 9.5, letterSpacing: 0.8, color: color, fontWeight: FontWeight.w800)),
+                Text(node['label'] ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+              ]),
+
             ),
             child: Row(children: [
               Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
@@ -153,6 +238,7 @@ class _NodeBox extends StatelessWidget {
           ),
         ),
       ),
+      ),
     );
   }
 }
@@ -161,7 +247,14 @@ class _EdgePainter extends CustomPainter {
   final List<Json> edges;
   final Map<String, Offset> pos;
   final Size box;
-  _EdgePainter(this.edges, this.pos, this.box);
+
+  /// The edges of the highlighted answer path, keyed by [GraphScreen.edgeKey],
+  /// and whether a path is being shown at all — with one, the rest fades back.
+  final Set<String> pathEdges;
+  final bool dimRest;
+  _EdgePainter(this.edges, this.pos, this.box, this.pathEdges, this.dimRest);
+
+  bool _onPath(Json e) => pathEdges.contains(GraphScreen.edgeKey(e['source'], e['target']));
 
   /// FULFILLS is the link the whole app turns on — a receipt closing the
   /// follow-up it answers — so it is drawn heavier and in the receipt colour
@@ -171,6 +264,7 @@ class _EdgePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final plain = Paint()
+
       ..color = C.muted.withValues(alpha: 0.45)
       ..strokeWidth = 1.3
       ..style = PaintingStyle.stroke;
@@ -184,6 +278,20 @@ class _EdgePainter extends CustomPainter {
       final a = pos[e['source']], b = pos[e['target']];
       if (a == null || b == null) continue;
       final paint = _highlighted(e) ? strong : plain;
+
+      ..color = C.muted.withValues(alpha: dimRest ? 0.12 : 0.45)
+      ..strokeWidth = 1.3
+      ..style = PaintingStyle.stroke;
+    final strong = Paint()
+      ..color = C.plum.withValues(alpha: 0.85)
+      ..strokeWidth = 2.8
+      ..style = PaintingStyle.stroke;
+    // The path is drawn last, so it reads on top of whatever it crosses.
+    for (final e in [...edges.where((e) => !_onPath(e)), ...edges.where(_onPath)]) {
+      final a = pos[e['source']], b = pos[e['target']];
+      if (a == null || b == null) continue;
+      final paint = _onPath(e) ? strong : plain;
+
       final forward = b.dx >= a.dx;
       final p1 = Offset(a.dx + (forward ? box.width : 0), a.dy + box.height / 2);
       final p2 = Offset(b.dx + (forward ? 0 : box.width), b.dy + box.height / 2);
@@ -204,7 +312,11 @@ class _EdgePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _EdgePainter old) => old.edges != edges || old.pos != pos;
+  bool shouldRepaint(covariant _EdgePainter old) =>
+      old.edges != edges ||
+      old.pos != pos ||
+      old.pathEdges != pathEdges ||
+      old.dimRest != dimRest;
 }
 
 /// Which row each node sits on, on one grid shared by every column, so that

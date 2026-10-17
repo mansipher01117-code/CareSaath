@@ -245,6 +245,30 @@ class _ReviewScreenState extends State<ReviewScreen> {
                 'Only checked facts are written to FalkorDB — and two items with the same name are the same item.',
                 style: TextStyle(color: C.muted, height: 1.5),
               ),
+              // A transcription is a model reading a picture, not the record
+              // itself, so the text on the left is worth checking against the
+              // original before any of it becomes evidence.
+              if (widget.draft['read_by'] == 'gemini')
+                Padding(
+                  padding: const EdgeInsets.only(top: 12),
+                  child: Panel(
+                    color: C.marigoldSoft,
+                    border: C.marigold,
+                    padding: const EdgeInsets.all(12),
+                    child: Row(children: [
+                      const Icon(Icons.auto_awesome_rounded, size: 16, color: C.marigold),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                            'This text was transcribed from '
+                            '${widget.draft['filename'] ?? 'an upload'} by Gemini. '
+                            'Read it against the original before confirming.',
+                            style: const TextStyle(
+                                color: C.marigold, fontSize: 13, height: 1.4)),
+                      ),
+                    ]),
+                  ),
+                ),
               const SizedBox(height: 22),
               wide
                   ? Row(crossAxisAlignment: CrossAxisAlignment.start, children: [

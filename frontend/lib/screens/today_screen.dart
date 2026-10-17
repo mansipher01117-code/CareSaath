@@ -5,6 +5,7 @@ import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 import 'profiles_screen.dart';
+import 'visit_prep_screen.dart';
 
 class TodayScreen extends StatelessWidget {
   final VoidCallback onAsk;
@@ -31,6 +32,16 @@ class TodayScreen extends StatelessWidget {
 
         final left = Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           _Header(person: person),
+          const SizedBox(height: 14),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: OutlinedButton.icon(
+              onPressed: () => Navigator.of(context)
+                  .push(MaterialPageRoute(builder: (_) => const VisitPrepScreen())),
+              icon: const Icon(Icons.print_outlined, size: 18),
+              label: const Text('Prepare for visit'),
+            ),
+          ),
           const SizedBox(height: 20),
           // The backend returns appointments soonest first; "Next" is only
           // honest about one that is still ahead.
@@ -287,18 +298,21 @@ class ChangeCard extends StatelessWidget {
         Text(change['doc_date'] ?? '', style: const TextStyle(color: C.muted)),
         const SizedBox(height: 14),
         for (final c in changed)
-          _row(Icons.change_circle_rounded, C.teal, c,
+          _row(context, Icons.change_circle_rounded, C.teal, c,
               Row(mainAxisSize: MainAxisSize.min, children: [
                 Text(_s(c['from']), style: const TextStyle(decoration: TextDecoration.lineThrough, color: C.muted, fontSize: 13)),
                 const Icon(Icons.arrow_forward_rounded, size: 14, color: C.muted),
                 Text(_s(c['to']), style: const TextStyle(color: C.teal, fontWeight: FontWeight.w700, fontSize: 13)),
-              ])),
+              ]),
+              // Only something that moved has two ends to put side by side.
+              why: true),
         for (final c in added)
-          _row(Icons.add_circle_rounded, C.plum, c,
+          _row(context, Icons.add_circle_rounded, C.plum, c,
               const Text('Now tracked', style: TextStyle(color: C.plum, fontWeight: FontWeight.w700, fontSize: 13))),
         for (final c in unchanged)
-          _row(Icons.pause_circle_outline_rounded, C.muted, c,
-              Text('Unchanged · ${_s(c['status'])}', style: const TextStyle(color: C.muted, fontSize: 13))),
+          _row(context, Icons.pause_circle_outline_rounded, C.muted, c,
+              Text('Unchanged · ${_s(c['status'])}', style: const TextStyle(color: C.muted, fontSize: 13)),
+              note: 'No new evidence touched this item'),
       ]),
     );
   }
@@ -307,19 +321,188 @@ class ChangeCard extends StatelessWidget {
   /// to show one chip for the whole change, pointing at a guessed "<doc>-P1" —
   /// a span id that often did not exist, and when it did, usually belonged to
   /// an unrelated paragraph.
-  Widget _row(IconData icon, Color color, Json entry, Widget trailing) => Padding(
+  Widget _row(BuildContext context, IconData icon, Color color, Json entry, Widget trailing,
+          {bool why = false, String? note}) =>
+      Padding(
         padding: const EdgeInsets.only(bottom: 10),
-        child: Row(children: [
-          Icon(icon, color: color, size: 20),
-          const SizedBox(width: 10),
-          Expanded(child: Text('${entry['label']}', style: const TextStyle(fontWeight: FontWeight.w700))),
-          Flexible(child: Align(alignment: Alignment.centerRight, child: trailing)),
-          if (entry['span_id'] != null) ...[
-            const SizedBox(width: 8),
-            SourceChip(spanId: entry['span_id'], docId: entry['doc_id']),
-          ],
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [
+            Icon(icon, color: color, size: 20),
+            const SizedBox(width: 10),
+            Expanded(child: Text('${entry['label']}', style: const TextStyle(fontWeight: FontWeight.w700))),
+            Flexible(child: Align(alignment: Alignment.centerRight, child: trailing)),
+            if (entry['span_id'] != null) ...[
+              const SizedBox(width: 8),
+              SourceChip(spanId: entry['span_id'], docId: entry['doc_id']),
+            ],
+          ]),
+          // On its own line: the status row is already as wide as it can get,
+          // and a button squeezed into it pushed the chip off the card.
+          if (why)
+            Padding(
+              padding: const EdgeInsets.only(left: 22),
+              child: TextButton.icon(
+                onPressed: () => showWhyChanged(context, entry),
+                icon: const Icon(Icons.help_outline_rounded, size: 15),
+                label: const Text('Why?'),
+                style: TextButton.styleFrom(
+                    foregroundColor: C.plum,
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 8)),
+              ),
+            ),
+          // An item nothing in this record touched still has a source of its
+          // own, from whichever record first asked for it.
+          if (note != null)
+            Padding(
+              padding: const EdgeInsets.only(left: 30, top: 2),
+              child: Row(children: [
+                Expanded(
+                  child: Text(note,
+                      style: const TextStyle(color: C.muted, fontSize: 12.5, height: 1.3)),
+                ),
+                if (_origin(entry) != null) ...[
+                  const SizedBox(width: 8),
+                  SourceChip(
+                      spanId: _origin(entry)!['span_id'], docId: _origin(entry)!['doc_id']),
+                ],
+              ]),
+            ),
         ]),
       );
+
+  /// Where an untouched item came from: the record that asked for it, or the
+  /// receipt if that is all there ever was.
+  static Json? _origin(Json entry) {
+    for (final key in ['requested_by', 'receipt']) {
+      final v = entry[key];
+      if (v is Map && v['span_id'] != null) return Json.from(v);
+    }
+    return null;
+  }
+}
+
+/// Both ends of one status change, side by side: the record that asked for
+/// the item, and the record whose receipt settled it — with the graph path
+/// that joins them. Everything comes from the change record the confirm
+/// wrote, so this is the evidence the status was derived from, not a retelling.
+Future<void> showWhyChanged(BuildContext context, Json entry) {
+  final request = entry['requested_by'];
+  final receipt = entry['receipt'];
+  final path = (entry['path'] as List?) ?? const [];
+  return showModalBottomSheet(
+    context: context,
+    isScrollControlled: true,
+    backgroundColor: C.paper,
+    shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(24))),
+    builder: (_) => DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.62,
+      maxChildSize: 0.92,
+      builder: (ctx, scroll) {
+        final wide = MediaQuery.sizeOf(ctx).width >= 760;
+        final left = _WhySide(
+          eyebrow: 'Asked for in',
+          empty: 'No confirmed record asks for this item.',
+          tint: C.marigoldSoft,
+          line: C.marigold,
+          evidence: request,
+        );
+        final right = _WhySide(
+          eyebrow: 'Receipt documented in',
+          empty: 'No confirmed record documents a receipt yet.',
+          tint: C.tealSoft,
+          line: C.teal,
+          evidence: receipt,
+        );
+        return ListView(controller: scroll, padding: const EdgeInsets.fromLTRB(24, 12, 24, 32), children: [
+          Center(child: Container(width: 40, height: 4, decoration: BoxDecoration(color: C.line, borderRadius: BorderRadius.circular(4)))),
+          const SizedBox(height: 18),
+          const Eyebrow('Why this changed', color: C.plum),
+          const SizedBox(height: 6),
+          Text('${entry['label']}', style: Theme.of(ctx).textTheme.titleLarge),
+          if (entry['from'] != null && entry['to'] != null)
+            Text('${_label(entry['from'])} → ${_label(entry['to'])}',
+                style: const TextStyle(color: C.muted)),
+          const SizedBox(height: 18),
+          if (wide)
+            Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Expanded(child: left),
+              const SizedBox(width: 20),
+              Expanded(child: right),
+            ])
+          else ...[
+            left,
+            const SizedBox(height: 14),
+            right,
+          ],
+          if (path.isNotEmpty) ...[
+            const SizedBox(height: 22),
+            const Eyebrow('The path between them'),
+            const SizedBox(height: 8),
+            PathTrail(path),
+          ],
+          const SizedBox(height: 18),
+          const Text('Status is derived by following these links to receipt evidence — '
+              'it is never stored as a flag.',
+              style: TextStyle(color: C.muted, fontSize: 12.5, height: 1.4)),
+        ]);
+      },
+    ),
+  );
+}
+
+String _label(Object? status) =>
+    status == 'receipt_documented' ? 'Receipt documented' : 'Receipt not documented';
+
+/// One side of the sheet: a record, the paragraph it says it in, and a chip
+/// back to the original. Without evidence it says so rather than showing an
+/// empty card.
+class _WhySide extends StatelessWidget {
+  final String eyebrow;
+  final String empty;
+  final Color tint;
+  final Color line;
+  final Object? evidence;
+  const _WhySide({
+    required this.eyebrow,
+    required this.empty,
+    required this.tint,
+    required this.line,
+    required this.evidence,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final e = evidence is Map ? Json.from(evidence as Map) : null;
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: e == null ? C.card : tint,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: e == null ? C.line : line),
+      ),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        Eyebrow(eyebrow, color: e == null ? C.muted : line),
+        const SizedBox(height: 8),
+        if (e == null)
+          Text(empty, style: const TextStyle(color: C.muted, fontSize: 13.5, height: 1.4))
+        else ...[
+          Row(children: [
+            Expanded(
+              child: Text('${e['doc_id']} · ${e['doc_title']}',
+                  style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 14.5)),
+            ),
+            SourceChip(spanId: e['span_id'], docId: e['doc_id']),
+          ]),
+          Text('${e['date'] ?? ''}', style: const TextStyle(color: C.muted, fontSize: 12.5)),
+          const SizedBox(height: 10),
+          Text('“${e['text'] ?? ''}”',
+              style: const TextStyle(fontSize: 14.5, height: 1.5, fontStyle: FontStyle.italic)),
+        ],
+      ]),
+    );
+  }
 }
 
 class _AskCard extends StatelessWidget {

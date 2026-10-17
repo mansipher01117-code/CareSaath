@@ -285,6 +285,7 @@ def test_the_graph_view_keeps_a_receipt_chain(reads):
     assert kinds["fu:referral@D02-P1"] == "Receipt"
 
 
+
 # ---------------- the receipt's event date, as the graph shows it ----------------
 
 def test_pretty_date_reads_as_a_date_a_person_would_say():
@@ -318,3 +319,70 @@ def test_a_receipt_node_is_labelled_with_its_event_date(reads):
     )
     labels = {n["id"]: n["label"] for n in g.subgraph(PID)["nodes"]}
     assert labels["fu:vitamin_d_report@D02-P1"] == "Receipt 20 Nov 2026"
+
+# ---------------- why did this item change? ----------------
+# The Today card can now open both ends of the story, so each entry carries the
+# request that started the item and the newest receipt that settled it, plus
+# the graph path between them. It used to carry one span and no way to tell
+# which of the two it was.
+
+def test_a_changed_entry_carries_both_ends_of_the_story(reads):
+    reads(
+        followups=_referral(requested=["2026-10-12"], received=["2026-10-15"]),
+        change={"doc_id": "R01", "doc_title": "Front desk slip", "doc_date": "2026-10-15",
+                "at": "2026-10-15T09:00:00+00:00",
+                "changed": '[{"id": "fu:knee_physio_referral", '
+                           '"label": "Knee physio referral", '
+                           '"from": "receipt_not_documented", "to": "receipt_documented"}]',
+                "unchanged": "[]", "added": "[]"},
+    )
+    entry = g.latest_change(PID)["changed"][0]
+
+    assert entry["requested_by"]["span_id"] == "D01-P1"
+    assert entry["requested_by"]["doc_id"] == "D01"
+    assert entry["receipt"]["span_id"] == "R01-P1"
+    assert entry["receipt"]["date"] == "2026-10-15"
+    # The path runs from the person through the request to the receipt.
+    assert entry["path"][0].startswith("Person:")
+    assert "FollowUp:Knee physio referral" in entry["path"]
+    assert entry["path"][-1] == "Document:R01"
+
+
+def test_the_newest_receipt_is_the_one_that_settled_it(reads):
+    """An older receipt is not what changed the status."""
+    reads(
+        followups=_referral(requested=["2026-10-12"], received=["2026-10-13", "2026-10-15"]),
+        change={"doc_id": "R02", "doc_title": "Slip", "doc_date": "2026-10-15",
+                "at": "2026-10-15T09:00:00+00:00",
+                "changed": '[{"id": "fu:knee_physio_referral", "label": "Knee physio referral",'
+                           ' "from": "receipt_not_documented", "to": "receipt_documented"}]',
+                "unchanged": "[]", "added": "[]"},
+    )
+    entry = g.latest_change(PID)["changed"][0]
+    assert entry["receipt"]["span_id"] == "R02-P1"
+
+
+def test_an_item_with_no_receipt_yet_says_so_rather_than_inventing_one(reads):
+    reads(
+        followups=_referral(requested=["2026-10-12"], received=[]),
+        change={"doc_id": "D01", "doc_title": "Referral note", "doc_date": "2026-10-12",
+                "at": "2026-10-12T09:00:00+00:00", "changed": "[]",
+                "added": '[{"id": "fu:knee_physio_referral", "label": "Knee physio referral",'
+                         ' "to": "receipt_not_documented"}]',
+                "unchanged": "[]"},
+    )
+    entry = g.latest_change(PID)["added"][0]
+    assert entry["receipt"] is None
+    assert entry["requested_by"]["span_id"] == "D01-P1"
+
+
+def test_an_entry_the_graph_no_longer_tracks_gains_no_sides(reads):
+    reads(
+        followups=[],
+        change={"doc_id": "R01", "doc_title": "Slip", "doc_date": "2026-10-15",
+                "at": "2026-10-15T09:00:00+00:00", "changed": "[]", "unchanged": "[]",
+                "added": '[{"id": "fu:gone", "label": "Gone", "to": "receipt_not_documented"}]'},
+    )
+    entry = g.latest_change(PID)["added"][0]
+    assert "requested_by" not in entry and "receipt" not in entry and "path" not in entry
+
