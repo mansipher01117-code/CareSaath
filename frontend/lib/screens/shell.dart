@@ -43,7 +43,7 @@ class _ShellState extends State<Shell> {
     final pages = [
       TodayScreen(onAsk: () => go(2), onAdd: addRecord),
       const RecordsScreen(),
-      const AskScreen(),
+      AskScreen(onShowGraph: () => go(3)),
       const GraphScreen(),
     ];
     final body = IndexedStack(index: index, children: pages);

@@ -480,6 +480,50 @@ def subgraph(pid):
     return {"nodes": list(nodes.values()), "edges": edges}
 
 
+def answer_path(pid, sources):
+    """The nodes and edges behind an answer's citations, for the graph view.
+
+    A citation names a (doc_id, span_id) pair. The path is those two nodes and
+    the person they belong to, plus whatever the cited spans actually evidence:
+    the follow-up a span requests, the receipt it documents, the appointment it
+    confirms, and the follow-up that receipt fulfils. Only the cited spans are
+    expanded — walking out from the person instead would light up every
+    document in the profile and highlight nothing in particular.
+
+    Every id is taken from the same subgraph the Graph screen draws, so a path
+    can never name a node that is not on screen.
+    """
+    view = subgraph(pid)
+    kind = {n["id"]: n["type"] for n in view["nodes"]}
+    cited = set()
+    for s in sources or []:
+        for key in ("doc_id", "span_id"):
+            v = (s or {}).get(key)
+            if isinstance(v, str) and v in kind:
+                cited.add(v)
+    # A refusal cites nothing, and so does an answer whose every citation was
+    # dropped. Either way there is no path — and the person on their own is
+    # not one, so highlighting them would claim evidence that does not exist.
+    if not cited:
+        return {"nodes": [], "edges": []}
+    nodes = set(cited)
+    if pid in kind:
+        nodes.add(pid)
+
+    out = {}
+    for e in view["edges"]:
+        out.setdefault(e["source"], set()).add(e["target"])
+    # span -> Receipt -> FollowUp is the longest chain out of a cited span.
+    frontier = {v for v in nodes if kind.get(v) == "EvidenceSpan"}
+    for _ in range(2):
+        frontier = {t for f in frontier for t in out.get(f, ())} - nodes
+        nodes |= frontier
+
+    edges = sorted({(e["source"], e["target"]) for e in view["edges"]
+                    if e["source"] in nodes and e["target"] in nodes})
+    return {"nodes": sorted(nodes), "edges": [[a, b] for a, b in edges]}
+
+
 def _node_label(n):
     t = n["labels"][0]
     if t == "Document":

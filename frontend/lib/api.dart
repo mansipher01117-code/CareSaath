@@ -89,3 +89,10 @@ class Api {
 /// Bumped whenever graph data changes, so screens refetch.
 final dataVersion = ValueNotifier<int>(0);
 void refreshAll() => dataVersion.value++;
+
+/// The slice of the graph an Ask answer rests on — `{nodes: [...ids],
+/// edges: [[source, target], ...]}` as /ask returns it — or null when nothing
+/// is highlighted. Written by an answer card, read by the Graph screen: the
+/// same one-way channel as [dataVersion], for the same reason.
+final graphHighlight = ValueNotifier<Json?>(null);
+void clearGraphHighlight() => graphHighlight.value = null;

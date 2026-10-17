@@ -61,6 +61,35 @@ APPOINTMENTS = [{"date": "20 October", "time": "10:00 AM",
                  "sources": [{"span_id": "D01-P2", "doc_id": "D01",
                               "text": DOCS["D01"]["spans"][1]["text"]}]}]
 
+# The same profile as a subgraph: the request in D01-P1, the receipt in D02-P1,
+# and the appointment D01-P2 confirms. D03 is a draft, so it is not in here.
+GRAPH_NODES = [
+    {"id": PID, "type": "Person", "label": "Nilofer"},
+    {"id": "D01", "type": "Document", "label": "D01 · Physio referral note"},
+    {"id": "D02", "type": "Document", "label": "D02 · Front desk slip"},
+    {"id": "D01-P1", "type": "EvidenceSpan", "label": "D01-P1", "doc_id": "D01"},
+    {"id": "D01-P2", "type": "EvidenceSpan", "label": "D01-P2", "doc_id": "D01"},
+    {"id": "D02-P1", "type": "EvidenceSpan", "label": "D02-P1", "doc_id": "D02"},
+    {"id": "fu:knee_physio_referral", "type": "FollowUp", "label": "Knee physio referral"},
+    {"id": "fu:knee_physio_referral@D02-P1", "type": "Receipt", "label": "Receipt 2026-10-15"},
+    {"id": "appt:2026:20 October:10:00 AM", "type": "Appointment", "label": "20 October 10:00 AM"},
+]
+GRAPH_EDGES = [
+    {"source": PID, "target": "D01", "type": "HAS_DOCUMENT"},
+    {"source": PID, "target": "D02", "type": "HAS_DOCUMENT"},
+    {"source": "D01", "target": "D01-P1", "type": "HAS_SPAN"},
+    {"source": "D01", "target": "D01-P2", "type": "HAS_SPAN"},
+    {"source": "D02", "target": "D02-P1", "type": "HAS_SPAN"},
+    {"source": "D01-P1", "target": "fu:knee_physio_referral", "type": "REQUESTS"},
+    {"source": "D01-P2", "target": "appt:2026:20 October:10:00 AM", "type": "CONFIRMS"},
+    {"source": "D02-P1", "target": "fu:knee_physio_referral@D02-P1",
+     "type": "DOCUMENTS_RECEIPT"},
+    {"source": "fu:knee_physio_referral@D02-P1", "target": "fu:knee_physio_referral",
+     "type": "FULFILLS"},
+    {"source": PID, "target": "fu:knee_physio_referral", "type": "HAS_FOLLOWUP"},
+    {"source": PID, "target": "appt:2026:20 October:10:00 AM", "type": "HAS_APPOINTMENT"},
+]
+
 
 @pytest.fixture(autouse=True)
 def records(monkeypatch):
@@ -79,6 +108,7 @@ def records(monkeypatch):
                      "from": "receipt_not_documented", "to": "receipt_documented"}],
         "unchanged": [], "added": []})
     monkeypatch.setattr(g, "get_document", lambda pid, doc_id: DOCS.get(doc_id))
+    monkeypatch.setattr(g, "subgraph", lambda pid: {"nodes": GRAPH_NODES, "edges": GRAPH_EDGES})
 
 
 # ---------------- a scripted Gemini client ----------------
@@ -496,3 +526,72 @@ def test_a_plain_error_is_still_readable_in_the_trace(gemini):
     gemini(RuntimeError("connection reset by peer"))
     res = agent.ask(PID, "What changed?", "en")
     assert "connection reset by peer" in res["trace"][0]["returned"]
+
+
+# ---------------- the graph path behind an answer ----------------
+# An answer cites spans; the Graph screen needs the nodes and edges those
+# citations actually rest on, so the reader can see the path rather than take
+# the chips on trust.
+
+def test_an_answer_carries_the_graph_path_behind_its_citations(gemini):
+    gemini(
+        turn(calls=[call("list_unresolved_followups")]),
+        turn(text=answer_json([{"text": "D02 documents that it was received.",
+                                "sources": [{"doc_id": "D02", "span_id": "D02-P1"}]}],
+                              intent="item")),
+    )
+
+    path = agent.ask(PID, "Was the referral received?", "en")["path"]
+
+    # The person, the cited document and span, and what that span evidences.
+    assert set(path["nodes"]) == {
+        PID, "D02", "D02-P1",
+        "fu:knee_physio_referral@D02-P1", "fu:knee_physio_referral"}
+    # The uncited document is not in it, so the highlight means something.
+    assert "D01" not in path["nodes"] and "D01-P1" not in path["nodes"]
+    assert [PID, "D02"] in path["edges"]
+    assert ["D02", "D02-P1"] in path["edges"]
+    assert ["D02-P1", "fu:knee_physio_referral@D02-P1"] in path["edges"]
+    assert ["fu:knee_physio_referral@D02-P1", "fu:knee_physio_referral"] in path["edges"]
+    # Every edge joins two nodes of the path.
+    assert all(a in path["nodes"] and b in path["nodes"] for a, b in path["edges"])
+
+
+def test_an_appointment_answer_lights_up_the_appointment(gemini):
+    gemini(
+        turn(calls=[call("retrieve_patient_context")]),
+        turn(text=answer_json(
+            [{"text": "Appointment confirmed for 20 October at 10:00 AM.",
+              "sources": [{"doc_id": "D01", "span_id": "D01-P2"}]}], intent="appointment")),
+    )
+
+    path = agent.ask(PID, "When is the appointment?", "en")["path"]
+
+    assert "appt:2026:20 October:10:00 AM" in path["nodes"]
+    assert "fu:knee_physio_referral" not in path["nodes"]
+
+
+def test_a_refusal_has_an_empty_path(gemini):
+    """Nothing was cited, so there is nothing to highlight."""
+    gemini(turn(text=answer_json([{"text": "That is a question for the doctor.",
+                                   "sources": []}], intent="refusal", refused=True)))
+
+    path = agent.ask(PID, "Should I halve her dose?", "en")["path"]
+    assert path == {"nodes": [], "edges": []}
+
+
+def test_a_dropped_citation_is_not_in_the_path(gemini):
+    """A node the tools never returned cannot be highlighted either."""
+    gemini(turn(text=answer_json([{"text": "An MRI was requested.",
+                                   "sources": [{"doc_id": "D07", "span_id": "D07-P3"}]}],
+                                 intent="item")))
+
+    path = agent.ask(PID, "What about the MRI?", "en")["path"]
+    assert path["nodes"] == [] and path["edges"] == []
+
+
+def test_the_rules_engine_returns_a_path_too(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    path = agent.ask(PID, "When is the appointment?", "en")["path"]
+    assert "appt:2026:20 October:10:00 AM" in path["nodes"]
+    assert PID in path["nodes"] and "D01-P2" in path["nodes"]

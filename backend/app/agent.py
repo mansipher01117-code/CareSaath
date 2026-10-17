@@ -445,7 +445,10 @@ def _respond(pid, question, lang, intent, engine, claims, results, trace, matche
                 top.append(s)
     return {"question": question, "lang": lang, "intent": intent, "engine": engine,
             "answer": [c["text"] for c in out_claims], "claims": out_claims,
-            "sources": top, "trace": trace, "matched_items": list(matched_items)}
+            "sources": top, "trace": trace, "matched_items": list(matched_items),
+            # The slice of the graph this answer rests on, so the Graph screen
+            # can show the reader the same path the answer walked.
+            "path": g.answer_path(pid, top)}
 
 
 # ---------------- rules engine ----------------
