@@ -4,9 +4,12 @@ Data is isolated per person: every profile gets its own graph named
 ``person_<id>``. A small registry graph (``REGISTRY_GRAPH``) holds the list of
 profiles so the app can show a picker before any person is selected.
 
-By default connects to a FalkorDB server (docker compose). Set
-FALKORDB_EMBEDDED=1 to use the embedded falkordblite engine instead
-(handy when Docker isn't available).
+By default (``FALKORDB_EMBEDDED=0``) connects to a FalkorDB server over
+FALKORDB_HOST / FALKORDB_PORT, with FALKORDB_USERNAME / FALKORDB_PASSWORD when
+the server asks for them — a local docker-compose instance needs neither, a
+managed/cloud one needs both. Set FALKORDB_EMBEDDED=1 to use the embedded
+falkordblite engine instead (handy when Docker isn't available; install it
+separately, it is not in requirements.txt).
 """
 import os
 import re
@@ -38,6 +41,13 @@ def _client():
     return FalkorDB(
         host=os.getenv("FALKORDB_HOST", "localhost"),
         port=int(os.getenv("FALKORDB_PORT", "6379")),
+        # Left unset for a local server, which accepts no credentials at all.
+        username=os.getenv("FALKORDB_USERNAME") or None,
+        password=os.getenv("FALKORDB_PASSWORD") or None,
+        # Bounded so an unreachable or sleeping server fails fast and /health
+        # can report the graph as unavailable, instead of hanging the request.
+        socket_connect_timeout=float(os.getenv("FALKORDB_CONNECT_TIMEOUT_S", "5")),
+        socket_timeout=float(os.getenv("FALKORDB_SOCKET_TIMEOUT_S", "10")),
     )
 
 
