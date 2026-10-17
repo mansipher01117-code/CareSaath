@@ -221,13 +221,17 @@ void dateEditingTests() {
     await pumpReview(tester, draft(facts: [requestFact]));
     await switchTypeTo(tester, 'Receipt');
 
-    expect(fieldText(tester, 'Receipt date'), '2026-10-12',
+    expect(fieldText(tester, 'Received on'), '2026-10-12',
         reason: 'it starts from the record date');
+    // Nothing in the paragraph said when it was received, so the card says
+    // the document's date is only standing in for the event date.
+    expect(find.textContaining('document date is standing in'), findsOneWidget);
 
-    await tester.enterText(field('Receipt date'), '2026-10-15');
+    await tester.enterText(field('Received on'), '2026-10-15');
     await tester.pumpAndSettle();
 
-    expect(fieldText(tester, 'Receipt date'), '2026-10-15');
+    expect(fieldText(tester, 'Received on'), '2026-10-15');
+    expect(find.textContaining('Your own date'), findsOneWidget);
     expect(find.text('Confirm 1 fact(s)'), findsOneWidget);
   });
 

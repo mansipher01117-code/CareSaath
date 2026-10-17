@@ -114,6 +114,19 @@ class PathTrail extends StatelessWidget {
   }
 }
 
+const _monthAbbr = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/// '2026-11-20' → '20 Nov 2026'. Anything that is not an ISO date — a blank,
+/// or a date somebody typed in their own words — comes back as it is, so no
+/// card ever shows a date the record did not give.
+String prettyDate(String? iso) {
+  final parts = (iso ?? '').split('-');
+  if (parts.length != 3 || parts.any((p) => int.tryParse(p) == null)) return iso ?? '';
+  final y = int.parse(parts[0]), m = int.parse(parts[1]), d = int.parse(parts[2]);
+  if (m < 1 || m > 12) return iso ?? '';
+  return '$d ${_monthAbbr[m - 1]} $y';
+}
+
 Color nodeColor(String type) {
   switch (type) {
     case 'Person':

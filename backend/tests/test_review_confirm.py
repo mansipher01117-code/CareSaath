@@ -249,3 +249,26 @@ def test_a_duplicate_found_at_confirm_time_discards_the_draft(client, graph, dra
     assert r.json()["change"]["doc_id"] == "R02"
     # No second copy of the facts was written.
     assert not [c for _, c, _ in graph.writes if "DOCUMENTS_RECEIPT" in c]
+
+
+# ---------------- the receipt's event date ----------------
+
+def test_a_receipt_event_date_and_its_origin_reach_the_graph(client, graph, draft):
+    r = confirm(client, [dict(GOOD_RECEIPT, date="2026-11-20", date_source="sentence")])
+    assert r.status_code == 200, r.text
+    written = [p for _, _, p in graph.writes if "rid" in p]
+    assert [(p["date"], p["date_source"]) for p in written] == [("2026-11-20", "sentence")]
+
+
+def test_a_receipt_with_no_stated_origin_is_recorded_as_the_document_date(client, graph, draft):
+    """An older client sends no origin at all; it is the document's date, which
+    is exactly what must not be passed off as the event date."""
+    r = confirm(client, [GOOD_RECEIPT])
+    assert r.status_code == 200, r.text
+    assert {p["date_source"] for _, _, p in graph.writes if "rid" in p} == {"document"}
+
+
+def test_an_invented_receipt_date_origin_is_rejected(client, graph, draft):
+    r = confirm(client, [dict(GOOD_RECEIPT, date_source="guessed")])
+    assert r.status_code == 400
+    assert graph.writes == []
