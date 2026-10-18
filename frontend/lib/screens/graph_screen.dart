@@ -131,11 +131,8 @@ class GraphScreen extends StatelessWidget {
                 width: width,
                 height: height,
                 child: Stack(children: [
-
                   // The first child of the Stack, so every edge is drawn
                   // behind the boxes instead of across their labels.
-                  CustomPaint(size: Size(width, height), painter: _EdgePainter(edges, pos, const Size(_w, _h))),
-
                   CustomPaint(
                       size: Size(width, height),
                       painter: _EdgePainter(
@@ -184,60 +181,38 @@ class _NodeBox extends StatelessWidget {
       // front-desk note" — stays readable on hover however long it is.
       message: '$type · $label',
       waitDuration: const Duration(milliseconds: 300),
-      child: Material(
-        color: C.card,
-        borderRadius: BorderRadius.circular(12),
-        child: InkWell(
+      child: Opacity(
+        // What is off the path fades back rather than being removed, so the
+        // answer stays placed inside the whole graph.
+        opacity: dimmed ? 0.3 : 1,
+        child: Material(
+          color: onPath ? C.plumSoft : C.card,
           borderRadius: BorderRadius.circular(12),
-          onTap: tappable
-              ? () => showSource(context, type == 'Document' ? node['id'] : node['doc_id'], type == 'EvidenceSpan' ? node['id'] : '')
-              : null,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: color.withValues(alpha: 0.5), width: 1.4),
-
-    return Opacity(
-      opacity: dimmed ? 0.3 : 1,
-      child: Material(
-      color: onPath ? C.plumSoft : C.card,
-      borderRadius: BorderRadius.circular(12),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: tappable
-            ? () => showSource(context, type == 'Document' ? node['id'] : node['doc_id'], type == 'EvidenceSpan' ? node['id'] : '')
-            : null,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10),
-          decoration: BoxDecoration(
+          child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-                color: color.withValues(alpha: onPath ? 1 : 0.5), width: onPath ? 2.6 : 1.4),
-          ),
-          child: Row(children: [
-            Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                Text(type, style: TextStyle(fontSize: 9.5, letterSpacing: 0.8, color: color, fontWeight: FontWeight.w800)),
-                Text(node['label'] ?? '', maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
-              ]),
-
-            ),
-            child: Row(children: [
-              Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  Text(type, style: TextStyle(fontSize: 9.5, letterSpacing: 0.8, color: color, fontWeight: FontWeight.w800)),
-                  Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
-                ]),
+            onTap: tappable
+                ? () => showSource(context, type == 'Document' ? node['id'] : node['doc_id'], type == 'EvidenceSpan' ? node['id'] : '')
+                : null,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: color.withValues(alpha: onPath ? 1 : 0.5), width: onPath ? 2.6 : 1.4),
               ),
-            ]),
+              child: Row(children: [
+                Container(width: 8, height: 8, decoration: BoxDecoration(color: color, shape: BoxShape.circle)),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(mainAxisAlignment: MainAxisAlignment.center, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text(type, style: TextStyle(fontSize: 9.5, letterSpacing: 0.8, color: color, fontWeight: FontWeight.w800)),
+                    Text(label, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+                  ]),
+                ),
+              ]),
+            ),
           ),
         ),
-      ),
       ),
     );
   }
@@ -263,35 +238,30 @@ class _EdgePainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // Every paint is built once, before the loop, and picked per edge.
     final plain = Paint()
-
-      ..color = C.muted.withValues(alpha: 0.45)
-      ..strokeWidth = 1.3
-      ..style = PaintingStyle.stroke;
-    final strong = Paint()
-      ..color = nodeColor('Receipt').withValues(alpha: 0.75)
-      ..strokeWidth = 2.4
-      ..style = PaintingStyle.stroke;
-    // Highlighted edges last, so they read on top of the quiet ones — all of
-    // them still behind the boxes, which are later children of the Stack.
-    for (final e in [...edges.where((e) => !_highlighted(e)), ...edges.where(_highlighted)]) {
-      final a = pos[e['source']], b = pos[e['target']];
-      if (a == null || b == null) continue;
-      final paint = _highlighted(e) ? strong : plain;
-
       ..color = C.muted.withValues(alpha: dimRest ? 0.12 : 0.45)
       ..strokeWidth = 1.3
       ..style = PaintingStyle.stroke;
-    final strong = Paint()
+    final fulfills = Paint()
+      ..color = nodeColor('Receipt').withValues(alpha: dimRest ? 0.2 : 0.75)
+      ..strokeWidth = 2.4
+      ..style = PaintingStyle.stroke;
+    final pathPaint = Paint()
       ..color = C.plum.withValues(alpha: 0.85)
       ..strokeWidth = 2.8
       ..style = PaintingStyle.stroke;
-    // The path is drawn last, so it reads on top of whatever it crosses.
-    for (final e in [...edges.where((e) => !_onPath(e)), ...edges.where(_onPath)]) {
+    // Quiet edges first, then FULFILLS, then the answer path, so each reads on
+    // top of what it crosses — all of them still behind the boxes, which are
+    // later children of the Stack.
+    for (final e in [
+      ...edges.where((e) => !_onPath(e) && !_highlighted(e)),
+      ...edges.where((e) => !_onPath(e) && _highlighted(e)),
+      ...edges.where(_onPath),
+    ]) {
       final a = pos[e['source']], b = pos[e['target']];
       if (a == null || b == null) continue;
-      final paint = _onPath(e) ? strong : plain;
-
+      final paint = _onPath(e) ? pathPaint : (_highlighted(e) ? fulfills : plain);
       final forward = b.dx >= a.dx;
       final p1 = Offset(a.dx + (forward ? box.width : 0), a.dy + box.height / 2);
       final p2 = Offset(b.dx + (forward ? 0 : box.width), b.dy + box.height / 2);
