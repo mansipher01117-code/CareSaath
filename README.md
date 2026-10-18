@@ -1,39 +1,181 @@
-# CareSaath — Family Health Companion (Graph Hacks 2026)
+# CareSaath — a family health graph an agent can act on
 
-Multilingual family health-record companion. Reviewed records are connected in
-**FalkorDB**, so the agent can answer *"what do I still need to clarify before the
-appointment?"* with a source for every claim — and when a new record arrives,
-**only the related item updates** while everything else stays (and says so).
+One app for a family's health records: every confirmed record becomes
+**connected evidence in FalkorDB**, so the agent can answer *"what do I still
+need to clarify before the appointment?"* with a source behind every claim —
+and show the exact graph path the answer came from.
 
-One app, many family members: each profile keeps its own records, follow-ups and
-graph.
+- **Live demo:** <https://caresaath-app.vercel.app>
+- **Demo video:** <VIDEO_LINK>
+- **Track:** 01 — Agents That Act on Connected Data
 
 > Not a diagnostic tool — it only explains what the records say.
 > There is no sign-in: anyone who can reach the API can read every profile in it.
 
-**Live demo:** _(not deployed yet — paste the frontend URL here)_
-
-Track: **01 — Agents That Act on Connected Data** (graph queries as agent tools,
-explainable results). Restart persistence also covers Track 02.
-
 ---
 
-## Stack
+## The problem
+
+A family's health records live in WhatsApp forwards, PDFs in a downloads folder
+and photos of paper slips. The clinic asks for the old lab report; three weeks
+later nobody can say whether it was ever handed over. Before a visit the
+question *"what is still pending?"* has no answer except scrolling, and a new
+record never tells you what it changed and what it left alone.
+
+## Graph model
+
+```mermaid
+graph LR
+  P[Person]
+  D["Document<br/>draft | confirmed"]
+  S[EvidenceSpan]
+  F[FollowUp]
+  R[Receipt]
+  A[Appointment]
+  C[Change]
+
+  P -->|HAS_DOCUMENT| D
+  D -->|HAS_SPAN| S
+  S -->|REQUESTS| F
+  P -->|HAS_FOLLOWUP| F
+  S -->|DOCUMENTS_RECEIPT| R
+  R -->|FULFILLS| F
+  S -->|CONFIRMS| A
+  P -->|HAS_APPOINTMENT| A
+  D -->|CAUSED| C
+```
+
+| Node | What it is |
+|---|---|
+| `Person` | One family member. Name, relation, caregiver. |
+| `Document` | One record as it arrived — pasted text, a PDF's text layer, or a transcribed photo. `status` is `draft` until a human confirms it. |
+| `EvidenceSpan` | One citable paragraph of a document (`D01-P2`). Every claim in an answer points at one of these. |
+| `FollowUp` | Something the clinic asked for, identified by its normalized name (`existing lab report` → `fu:existing_lab_report`), so renaming an item on the Review screen is also how you merge duplicates. |
+| `Receipt` | Evidence that a requested item actually arrived, carrying the date the record gave. |
+| `Appointment` | A confirmed date + time. The year is part of its identity, so "20 October" in two years is two appointments. |
+| `Change` | What one confirm moved: which follow-ups changed, stayed the same, or were newly added. Backs the "Why?" view. |
+
+**One isolated graph per person.** Each profile's records live in its own graph,
+`person_<id>` (`db.graph_name`), and a small registry graph (`caresaath_people`)
+holds nothing but the list of profiles. Every endpoint takes a `person_id` and
+only ever opens that person's graph — including the agent's tools, which are
+bound to one person before the model is asked anything.
+
+## How the graph does the work
+
+1. **Status is derived by traversal, never stored as a flag.** There is no
+   `done: true` anywhere. A follow-up counts as settled only if the graph can
+   walk `FollowUp ← FULFILLS ← Receipt ← DOCUMENTS_RECEIPT ← EvidenceSpan ←
+   HAS_SPAN ← Document {status:'confirmed'}`. An unconfirmed draft leaves the
+   document end of that walk null, so a draft can never close anything, and a
+   confirm that died half-way leaves nodes nothing confirmed points at — which
+   every reader skips instead of showing. The main query is `PREP_CYPHER` in
+   `backend/app/graph_ops.py`, also returned by `GET /preparation`:
+
+   ```cypher
+   MATCH (p:Person {id:$pid})-[:HAS_FOLLOWUP]->(f:FollowUp)
+   OPTIONAL MATCH (rs:EvidenceSpan)-[:REQUESTS]->(f)
+   OPTIONAL MATCH (rd:Document {status:'confirmed'})-[:HAS_SPAN]->(rs)
+   WITH p, f, collect(DISTINCT {span_id:rs.id, doc_id:rd.id, doc_title:rd.title,
+                                date:rd.date, text:rs.text}) AS requested_by
+   OPTIONAL MATCH (f)<-[:FULFILLS]-(r:Receipt)<-[:DOCUMENTS_RECEIPT]-(es:EvidenceSpan)
+                  <-[:HAS_SPAN]-(ed:Document {status:'confirmed'})
+   RETURN f.id AS id, f.item AS item, f.label AS label, requested_by,
+          collect(DISTINCT {span_id:es.id, doc_id:ed.id, doc_title:ed.title,
+                            date:r.date, date_source:r.date_source,
+                            text:es.text}) AS receipts
+   ORDER BY f.label
+   ```
+
+   Because request and receipt both come back with their dates, a *repeat*
+   request reopens an item: a receipt older than the newest request does not
+   close it.
+
+2. **A new record updates only the connected item.** `MERGE` on the follow-up's
+   derived key attaches the new evidence to the item it belongs to and touches
+   nothing else. The confirm snapshots the derived statuses before and after,
+   diffs them, and writes a `Change` node — so the app can say *this moved,
+   these stayed exactly as they were*, and the "Why?" view can show the request
+   that opened an item and the receipt that settled it, each with its own span.
+
+3. **The agent's tools are graph queries.** Four read-only tools, each closed
+   over one `pid` (`agent.tools_for`): `retrieve_patient_context`,
+   `list_unresolved_followups`, `latest_change`, `inspect_source_span`. Gemini
+   chooses among them; it never sees the database or writes Cypher. Every claim
+   it returns carries the `(doc_id, span_id)` pairs it rests on, and
+   `validate_sources()` checks each pair against the set of pairs the tools
+   actually returned, dropping anything else. An invented citation becomes a
+   claim with no evidence chip — never a fabricated source.
+
+4. **"Show in graph" highlights the exact path behind an answer.** The cited
+   spans and their documents, plus whatever those spans actually evidence (the
+   follow-up a span requests, the receipt it documents, the appointment it
+   confirms), are resolved against the same subgraph the Graph screen draws
+   (`answer_path`), so a highlighted path can never name a node that is not on
+   screen. An answer that cites nothing highlights nothing.
+
+## Agent flow
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant G as Gemini (tool calling)
+  participant T as Graph tools (scoped to one person)
+  participant F as FalkorDB, one graph per person
+  U->>G: question (en / hi)
+  G->>T: retrieve_patient_context / list_unresolved_followups /<br/>latest_change / inspect_source_span
+  T->>F: Cypher
+  F-->>T: rows + (doc_id, span_id) evidence
+  T-->>G: tool results
+  G-->>U: answer: claims with validated citations + graph path
+  Note over T,G: validate_sources() drops any citation<br/>the tools did not return
+  Note over U,G: no key / timeout / bad JSON →<br/>rules engine answers, "engine": "rules"
+```
+
+The rules engine is the deterministic original agent, kept whole as the floor
+the product never falls below: it routes by keyword to the same tools and
+composes templated claims from the same graph rows. Both engines refuse
+medical, dosage and diagnosis questions.
+
+## Features
+
+- **Many profiles, one app.** Each family member has their own records,
+  follow-ups and graph; the switcher in the shell moves between them.
+- **Add a record** by pasting text or uploading a PDF or photo. A PDF with a
+  text layer is read with pypdf; anything else is transcribed by Gemini, which
+  is told to transcribe only — no summarising, translating or correcting.
+- **Human review is the gate.** The extractor suggests facts; you rename an
+  item, point it at a different paragraph, change its type, or uncheck it. Only
+  confirmed facts reach the graph.
+- **Today** — the appointment and every follow-up with its derived status, the
+  evidence behind it, and the graph path that derived it.
+- **Ask** — questions in English or Hindi/Hinglish, answered only from that
+  person's confirmed records, with a source chip under each claim, the tool
+  trace, and an **AI**/**Rules** badge saying which engine answered.
+- **Graph** — that person's live subgraph; tap a document or span for the
+  original words, or highlight the path behind the last answer.
+- **Visit preparation** — a printable sheet in preparation order, every line
+  with the quote it came from.
+
+## Tech stack
 
 | Part | Tech |
 |---|---|
-| App (web + Android) | Flutter / Dart (`frontend/`) |
-| API + agent | Python, FastAPI (`backend/`) |
-| Context graph | FalkorDB + Cypher (`docker-compose.yml`) |
+| App (web + Android) | Flutter / Dart (`frontend/`), deployed on Vercel |
+| API + agent | Python, FastAPI (`backend/`), deployed on Vercel |
+| Context graph | FalkorDB Cloud + Cypher (`docker-compose.yml` locally) |
+| LLM | Gemini — tool calling in Ask, transcription for uploads |
 
-## Run it (3 terminals)
+## Run locally
 
-**1. FalkorDB** (with persistent volume + browser on :3000)
+**1. FalkorDB** — persistent volume, browser on :3000:
+
 ```bash
 docker compose up -d
 ```
 
-**2. Backend**
+**2. Backend:**
+
 ```bash
 cd backend
 python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
@@ -41,183 +183,81 @@ pip install -r requirements.txt
 cp .env.example .env     # then put a free Gemini key in GEMINI_API_KEY
 uvicorn app.main:app --reload --port 8000
 ```
-The key is optional: without it the agent answers from the deterministic rules
-engine instead and says so (`"engine": "rules"`). Get one free at
-<https://aistudio.google.com/apikey>. `.env` is gitignored.
-Nothing is seeded — the app starts empty and you create the first profile in the
-UI. Check http://localhost:8000/health and http://localhost:8000/docs.
+
+The key is optional: without it the agent answers from the rules engine and says
+so (`"engine": "rules"`), and an upload with no text layer is refused rather
+than guessed at. Get one free at <https://aistudio.google.com/apikey>; `.env` is
+gitignored. Nothing is seeded — the app starts empty and you create the first
+profile in the UI. Check <http://localhost:8000/health> and `/docs`.
 
 No Docker? `pip install falkordblite` and run with `FALKORDB_EMBEDDED=1`
 (Linux/macOS only — `redislite` does not build on Windows).
 
-**3. Flutter app**
+**3. Flutter app:**
+
 ```bash
 cd frontend
-flutter create . --project-name caresaath --platforms web,android   # generates web/ and android/ folders (once)
 flutter pub get
 flutter run -d chrome
 ```
-Android emulator:
-```bash
-flutter run -d emulator-5554 --dart-define=API_URL=http://10.0.2.2:8000
-```
-and add `android:usesCleartextTraffic="true"` to the `<application>` tag in
-`android/app/src/main/AndroidManifest.xml` (local http only).
 
-## Deploy (Vercel)
-
-Two Vercel projects from this one repo: the API as a Python function, the
-Flutter app as a static upload. No sign-in is added by deploying — see the
-warning at the top before putting real records in a public deployment.
-
-**1. Backend** — new Vercel project from this repo:
-
-- **Root Directory:** `backend`
-- **Framework Preset:** FastAPI
-- **Environment variables:**
-
-  | Name | Value |
-  |---|---|
-  | `FALKORDB_EMBEDDED` | `0` |
-  | `FALKORDB_HOST` | your FalkorDB Cloud host |
-  | `FALKORDB_PORT` | your FalkorDB Cloud port |
-  | `FALKORDB_USERNAME` | your FalkorDB Cloud username |
-  | `FALKORDB_PASSWORD` | your FalkorDB Cloud password |
-  | `GEMINI_API_KEY` | free key from <https://aistudio.google.com/apikey> (optional) |
-  | `GEMINI_MODEL` | `gemini-flash-latest` |
-  | `ALLOWED_ORIGINS` | `*` for now; the frontend URL once step 2 is done |
-
-  The embedded engine is not an option here — `FALKORDB_EMBEDDED=0` and a
-  reachable server is the only deployed configuration.
-
-- Deploy, then check `https://<backend>.vercel.app/health`. It answers even
-  when the graph does not: `"graph": "unavailable"` means the API is up and the
-  database settings are wrong or the server is asleep.
-
-**2. Frontend** — build locally, upload the output:
-
-```powershell
-.uild_web.ps1 https://<backend>.vercel.app
-```
-
-That runs `flutter build web --release --dart-define=API_URL=<url>` in
-`frontend/` and copies `frontend/vercel.json` into `frontend/build/web`. Then
-create a second Vercel project from `frontend/build/web` (`vercel deploy --prod`
-from inside that folder, or drag the folder into the Vercel dashboard). The
-API URL is compiled into the build, so re-run the script after the backend URL
-changes.
-
-**3. Lock down CORS** — set `ALLOWED_ORIGINS` on the backend project to the
-frontend's origin (e.g. `https://caresaath.vercel.app`) and redeploy.
-
-## Using it
-
-1. **Add the first family member** — name, relation, optional caregiver. The
-   selected profile is remembered in browser/device storage, and the switcher in
-   the shell moves between profiles.
-2. **Add record** — paste a visit note, a front-desk slip, anything. Leave a
-   blank line between paragraphs; each paragraph becomes a citable source.
-3. **Review** — the extractor suggests facts. Rename an item, point it at a
-   different paragraph, or uncheck it. Only what you confirm reaches the graph.
-4. **Today** — the appointment and every follow-up, each with the evidence
-   behind its status and the graph path that derived it.
-5. **Ask** — any question, in English or Hindi/Hinglish, answered only from that
-   person's confirmed records, with a source under each claim and the agent's tool
-   trace. The badge on an answer says who wrote it: **AI** (Gemini chose the tools
-   and phrased the answer) or **Rules** (the deterministic fallback).
-6. **Graph** — that person's live subgraph; tap a document or span for the
-   original text.
-
-## Profiles and isolation
-
-Each profile gets **its own FalkorDB graph**, `person_<id>`, and a small registry
-graph (`caresaath_people`) holds just the list of profiles. Every record endpoint
-requires a `person_id` and only ever opens that person's graph, so a query
-written for one family member cannot reach another's records — including the
-agent's tools, which are bound to one person before they run.
-
-## Follow-up items
-
-Items are not a fixed list. The extractor reads any *"please bring / bring /
-carry X"* request and any *"X was received"* receipt out of the text and
-normalizes X into a key (`existing lab report` → `existing_lab_report`). The
-review step is where that guess gets corrected: the item name is a free-text
-field, and two items whose names normalize to the same key are the same
-follow-up — so renaming is also how you merge.
-
-## Graph model
-
-```
-(:Person)-[:HAS_DOCUMENT]->(:Document {status: draft|confirmed})
-(:Document)-[:HAS_SPAN]->(:EvidenceSpan)                 # citable paragraph
-(:EvidenceSpan)-[:REQUESTS]->(:FollowUp)<-[:HAS_FOLLOWUP]-(:Person)
-(:EvidenceSpan)-[:DOCUMENTS_RECEIPT]->(:Receipt)-[:FULFILLS]->(:FollowUp)
-(:EvidenceSpan)-[:CONFIRMS]->(:Appointment)<-[:HAS_APPOINTMENT]-(:Person)
-(:Document)-[:CAUSED]->(:Change)                         # what moved / what stayed
-```
-Status is **derived by traversal** (FollowUp ← Receipt ← Span ← confirmed Document),
-never stored as a bare flag. The main query is `PREP_CYPHER` in
-`backend/app/graph_ops.py`, also returned by `GET /preparation`.
+Android emulator: `flutter run -d emulator-5554 --dart-define=API_URL=http://10.0.2.2:8000`.
+To build the deployed web bundle: `./build_web.ps1 https://<backend-url>`, which
+compiles `API_URL` into the build.
 
 ## API
 
-Every path below except `/health` and `/people` takes a `person_id` query
-parameter, and returns 404 if no such profile exists.
+Every path except `/health` and `/people` takes a `person_id` query parameter,
+and returns 404 if no such profile exists.
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | /health | API + graph status |
-| POST | /people | create a profile `{name, relation, caregiver?}` |
-| GET | /people | all profiles with their record counts |
-| GET | /people/{id} | one profile + appointments |
-| DELETE | /people/{id} | delete the profile and drop its graph |
+| POST / GET | /people | create a profile `{name, relation, caregiver?}` / list profiles |
+| GET / DELETE | /people/{id} | profile + appointments / delete it and drop its graph |
 | GET | /records, /records/{id} | timeline, original source with spans |
 | POST | /records/preview | draft + suggested facts (not used in answers) |
-| POST | /records/{id}/confirm | write reviewed facts → graph, returns change diff |
+| POST | /people/{id}/records/upload | PDF or photo → text → the same draft flow |
+| POST | /records/{id}/confirm | write reviewed facts → graph, returns the change diff |
 | DELETE | /records/{id} | discard a draft |
 | GET | /preparation | follow-ups with derived status, sources, graph path |
 | GET | /changes/latest | last change (changed / unchanged / added) |
 | GET | /graph | subgraph for the graph view |
-| POST | /ask | agent answer `{answer, claims, sources, trace, intent, engine}` (lang: en/hi) |
+| POST | /ask | `{answer, claims, sources, trace, intent, engine}` (lang: en/hi) |
 
-## Where to add features next
+## Safety
 
-| Feature | Where |
-|---|---|
-| Another model (Claude, a local one) | `agent.py` → `_client()` + `llm_ask()`; the tools, the claim contract and `validate_sources()` stay as they are |
-| PDF / image + OCR | new `POST /records/upload` → text → same `extract()` → same review flow |
-| Better extraction | replace `extractor.extract()` (keep the returned shape) |
-| More languages (bn, mr, ta, te) | add to `T` in `agent.py` + `_langs` in `ask_screen.dart` (or Sarvam translate) |
-| Voice | Sarvam STT/TTS in Ask screen |
-| MCP | expose `agent.tools_for(pid)` as MCP tools |
-| Auth | a login in front of the profile picker; the per-person graph split is already there |
+- **No diagnosis, no medical advice.** The app explains what a person's own
+  records say and nothing more. Both engines refuse dosage, diagnosis and
+  "is it safe" questions outright, without reading any records.
+- **Human review before anything becomes evidence.** Extraction and
+  transcription only ever produce a *draft*. A person confirms each fact — and
+  can rename it, re-point it, retype it or drop it — before it enters the graph,
+  and nothing unconfirmed is ever read by the agent.
+- **Citations are enforced server-side.** A claim can only cite evidence the
+  tools returned; anything else is dropped before it reaches the screen.
+- **Per-person isolation is structural**, not a filter: one graph per profile.
 
-## Honest limitations (v0.2)
+## Limitations
 
-- Extraction is rule-based: it reads request/receipt phrasings sentence by
-  sentence, so it will over- and under-match. Human review is the safety net,
-  and every date, time and item name is editable there.
-- The LLM is free-tier Gemini Flash: on a rate limit, a timeout (20s) or malformed
-  JSON the answer silently drops to the rules engine, which is more rigid and only
-  routes to three of the four tools. Both engines refuse medical, dosage and
-  diagnosis questions, but the fallback does it by keyword, so it both misses
-  phrasings and occasionally refuses a records question that merely says "dose".
-- **A confirm is not one transaction.** Facts are written with several queries,
-  and FalkorDB gives no rollback across them. A confirm that dies half-way is
-  made *invisible* rather than undone: a follow-up or appointment with no
-  confirmed evidence behind it is skipped by `/preparation`, `/graph` and the
-  agent's tools. The orphan nodes stay in the graph.
-- An appointment only has a year if the record stated one. Without it the
-  appointment cannot be ordered against today, so it is never called the "next"
-  one — it is shown as "appointment on record" with the year marked unknown.
-- A follow-up is one item, not one episode per request. Repeat requests reopen
-  it by date (a receipt older than the newest request does not close it), but
-  the history of each round is not kept separately.
-- English + Hindi/Hinglish answers only; UI chrome is English.
-- Text entry only; no file upload yet.
-- Connects to a FalkorDB server (local or managed — `FALKORDB_USERNAME` /
-  `FALKORDB_PASSWORD` are sent when set), or to the embedded engine locally.
-  The connection is plain TCP: a cloud server that requires TLS is not
-  supported yet.
 - **No auth.** Every profile on the server is visible to anyone who can reach
-  the API — run it locally, and think before putting real health data in it.
+  the API — think before putting real health data in the live demo.
+- Extraction is rule-based: it reads request/receipt phrasings sentence by
+  sentence, so it over- and under-matches. Human review is the safety net, and
+  every date, time and item name is editable there.
+- Free-tier Gemini Flash: on a rate limit, a 20s timeout or malformed JSON the
+  answer drops to the rules engine, which is more rigid and routes to three of
+  the four tools. The fallback also refuses by keyword, so it misses phrasings
+  and occasionally refuses a records question that merely says "dose".
+- **A confirm is not one transaction.** Facts are written with several queries
+  and FalkorDB gives no rollback across them. A confirm that dies half-way is
+  made *invisible* rather than undone — a follow-up with no confirmed evidence
+  behind it is skipped by `/preparation`, `/graph` and the agent's tools — but
+  the orphan nodes stay in the graph.
+- An appointment only has a year if the record stated one. Without it, it cannot
+  be ordered against today and is shown as "appointment on record", year unknown.
+- A follow-up is one item, not one episode per request. Repeat requests reopen
+  it by date, but the history of each round is not kept separately.
+- English + Hindi/Hinglish answers only; UI chrome is English.
+- The FalkorDB connection is plain TCP, so a server that requires TLS is not
+  supported yet.
