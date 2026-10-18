@@ -7,22 +7,46 @@ import '../profiles.dart';
 import '../theme.dart';
 import '../widgets/common.dart';
 
+const _cols = {'Person': 0, 'Document': 1, 'EvidenceSpan': 2, 'FollowUp': 3, 'Appointment': 3, 'Receipt': 4};
+const _w = 236.0, _h = 46.0, _gapX = 64.0, _gapY = 22.0, _pad = 40.0;
+
 /// Live view of the selected person's own subgraph in FalkorDB, laid out in
 /// columns by node type.
-class GraphScreen extends StatelessWidget {
+class GraphScreen extends StatefulWidget {
   const GraphScreen({super.key});
-
-  static const _cols = {'Person': 0, 'Document': 1, 'EvidenceSpan': 2, 'FollowUp': 3, 'Appointment': 3, 'Receipt': 4};
-  static const _w = 236.0, _h = 46.0, _gapX = 64.0, _gapY = 22.0, _pad = 40.0;
 
   /// "source→target" for one edge, so a highlighted edge can be looked up
   /// without comparing lists.
   static String edgeKey(Object? a, Object? b) => '$a→$b';
 
   @override
+  State<GraphScreen> createState() => _GraphScreenState();
+}
+
+class _GraphScreenState extends State<GraphScreen> {
+  /// Where the reader has dragged each node, on top of its computed layout
+  /// position. It survives a highlight change or a refresh — the reader
+  /// arranged this picture — and is cleared only when the person changes or
+  /// "Reset layout" is pressed.
+  final _moved = <String, Offset>{};
+  String? _pid;
+
+  /// A pointer is down on a node, so the canvas must not pan along with it.
+  /// Set on pointer-down rather than on pan start, which only arrives after
+  /// the drag threshold — by when the canvas would already have moved.
+  bool _onNode = false;
+
+  /// The canvas is being dragged, which is all the "grabbing" cursor means.
+  bool _panning = false;
+
+  @override
   Widget build(BuildContext context) {
     final pid = profiles.selectedId;
     if (pid == null) return const SizedBox.shrink();
+    if (_pid != pid) {
+      _pid = pid;
+      _moved.clear();
+    }
     // The slice of the graph the last Ask answer rests on, when the reader
     // asked to see it.
     return ValueListenableBuilder<Json?>(
@@ -37,7 +61,7 @@ class GraphScreen extends StatelessWidget {
     };
     final pathEdges = {
       for (final e in (highlight?['edges'] as List? ?? const []))
-        if (e is List && e.length >= 2) edgeKey(e[0], e[1]),
+        if (e is List && e.length >= 2) GraphScreen.edgeKey(e[0], e[1]),
     };
     return Loader<Json>(
       load: () => Api.graph(pid),
@@ -57,9 +81,15 @@ class GraphScreen extends StatelessWidget {
         final pos = <String, Offset>{};
         byCol.forEach((col, list) {
           for (final n in list) {
-            pos[n['id']] = Offset(_pad + col * (_w + _gapX), _pad + row['${n['id']}']! * (_h + _gapY));
+            pos['${n['id']}'] = Offset(_pad + col * (_w + _gapX), _pad + row['${n['id']}']! * (_h + _gapY));
           }
         });
+        // Where each node actually sits: its place in the layout, moved by
+        // however far the reader has dragged it. The edges are drawn from this
+        // too, so they follow a node while it is being dragged.
+        final at = {
+          for (final e in pos.entries) e.key: e.value + (_moved[e.key] ?? Offset.zero),
+        };
 
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Padding(
@@ -68,7 +98,8 @@ class GraphScreen extends StatelessWidget {
               Text('${profiles.selectedName}’s context graph',
                   style: Theme.of(context).textTheme.headlineMedium),
               Text('${nodes.length} nodes · ${edges.length} relationships · live from person_$pid. '
-                  'Tap a document or span to open the source.',
+                  'Tap a document or span to open the source; drag a node to move it, '
+                  'drag the canvas to pan, scroll to zoom.',
                   style: const TextStyle(color: C.muted)),
               if (onPath.isNotEmpty) ...[
                 const SizedBox(height: 10),
@@ -93,13 +124,23 @@ class GraphScreen extends StatelessWidget {
                 ]),
               ],
               const SizedBox(height: 12),
-              Wrap(spacing: 14, runSpacing: 6, children: [
-                for (final t in ['Person', 'Document', 'EvidenceSpan', 'FollowUp', 'Appointment', 'Receipt'])
-                  Row(mainAxisSize: MainAxisSize.min, children: [
-                    Container(width: 10, height: 10, decoration: BoxDecoration(color: nodeColor(t), shape: BoxShape.circle)),
-                    const SizedBox(width: 6),
-                    Text(t, style: const TextStyle(fontSize: 12.5)),
+              Row(children: [
+                Expanded(
+                  child: Wrap(spacing: 14, runSpacing: 6, children: [
+                    for (final t in ['Person', 'Document', 'EvidenceSpan', 'FollowUp', 'Appointment', 'Receipt'])
+                      Row(mainAxisSize: MainAxisSize.min, children: [
+                        Container(width: 10, height: 10, decoration: BoxDecoration(color: nodeColor(t), shape: BoxShape.circle)),
+                        const SizedBox(width: 6),
+                        Text(t, style: const TextStyle(fontSize: 12.5)),
+                      ]),
                   ]),
+                ),
+                TextButton.icon(
+                  // Nothing to put back until something has been moved.
+                  onPressed: _moved.isEmpty ? null : () => setState(_moved.clear),
+                  icon: const Icon(Icons.restart_alt_rounded, size: 16),
+                  label: const Text('Reset layout'),
+                ),
               ]),
             ]),
           ),
@@ -122,35 +163,65 @@ class GraphScreen extends StatelessWidget {
             )
           else
           Expanded(
-            child: InteractiveViewer(
-              constrained: false,
-              boundaryMargin: const EdgeInsets.all(200),
-              minScale: 0.4,
-              maxScale: 2,
-              child: SizedBox(
-                width: width,
-                height: height,
-                child: Stack(children: [
-                  // The first child of the Stack, so every edge is drawn
-                  // behind the boxes instead of across their labels.
-                  CustomPaint(
-                      size: Size(width, height),
-                      painter: _EdgePainter(
-                          edges, pos, const Size(_w, _h), pathEdges, onPath.isNotEmpty)),
+            child: MouseRegion(
+              // Empty canvas: an open hand to say it can be dragged, closing
+              // while it is being dragged.
+              cursor: _panning ? SystemMouseCursors.grabbing : SystemMouseCursors.grab,
+              child: InteractiveViewer(
+                constrained: false,
+                // Unbounded, so the graph can always be dragged back into view
+                // instead of catching on an edge, however far a node has been
+                // moved out of the laid-out area.
+                boundaryMargin: const EdgeInsets.all(double.infinity),
+                minScale: 0.4,
+                maxScale: 2,
+                // A node being dragged owns that gesture and the canvas stays
+                // still under it; the wheel still zooms either way.
+                panEnabled: !_onNode,
+                trackpadScrollCausesScale: true,
+                onInteractionStart: (_) => setState(() => _panning = true),
+                onInteractionEnd: (_) => setState(() => _panning = false),
+                child: SizedBox(
+                  width: width,
+                  height: height,
+                  child: Stack(children: [
+                    // The first child of the Stack, so every edge is drawn
+                    // behind the boxes instead of across their labels.
+                    CustomPaint(
+                        size: Size(width, height),
+                        painter: _EdgePainter(
+                            edges, at, const Size(_w, _h), pathEdges, onPath.isNotEmpty)),
 
-                  for (final n in nodes)
-                    if (pos[n['id']] != null)
-                      Positioned(
-                        left: pos[n['id']]!.dx,
-                        top: pos[n['id']]!.dy,
-                        width: _w,
-                        height: _h,
-                        child: _NodeBox(
-                            node: n,
-                            onPath: onPath.contains('${n['id']}'),
-                            dimmed: onPath.isNotEmpty && !onPath.contains('${n['id']}')),
-                      ),
-                ]),
+                    for (final n in nodes)
+                      if (at['${n['id']}'] != null)
+                        Positioned(
+                          left: at['${n['id']}']!.dx,
+                          top: at['${n['id']}']!.dy,
+                          width: _w,
+                          height: _h,
+                          child: MouseRegion(
+                            cursor: SystemMouseCursors.move,
+                            child: Listener(
+                              onPointerDown: (_) => setState(() => _onNode = true),
+                              onPointerUp: (_) => setState(() => _onNode = false),
+                              onPointerCancel: (_) => setState(() => _onNode = false),
+                              // A drag moves this one box; a tap is left to the
+                              // InkWell inside, which opens the source.
+                              child: GestureDetector(
+                                onPanUpdate: (d) => setState(() {
+                                  final id = '${n['id']}';
+                                  _moved[id] = (_moved[id] ?? Offset.zero) + d.delta;
+                                }),
+                                child: _NodeBox(
+                                    node: n,
+                                    onPath: onPath.contains('${n['id']}'),
+                                    dimmed: onPath.isNotEmpty && !onPath.contains('${n['id']}')),
+                              ),
+                            ),
+                          ),
+                        ),
+                  ]),
+                ),
               ),
             ),
           ),
