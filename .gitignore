@@ -11,3 +11,7 @@ frontend/build/
 .env
 backend/.env
 !.env.example
+
+frontend/.flutter-plugins-dependencies
+frontend/*.iml
+frontend/.idea/
