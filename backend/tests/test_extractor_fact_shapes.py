@@ -4,7 +4,7 @@ Each type carries only its own fields — a request has no date, an appointment
 has no item, an absence_note has `items` and never `item`. That asymmetry is
 why switching a fact's type cannot just overwrite `type` and keep the rest.
 """
-from app.extractor import extract
+from app.extractor import extract, sentence_date
 
 NOTE = (
     "Please bring the knee physio referral to the next appointment.\n\n"
@@ -129,3 +129,64 @@ def test_an_appointment_without_a_year_says_so_instead_of_guessing():
     f = appointment_in("Appointment confirmed for 20 October at 10:00 AM.")
     assert f["year"] == ""
     assert f["date"] == "20 October" and f["time"] == "10:00 AM"
+
+
+# ---------------- a receipt's event date is the sentence's, not the file's ----------------
+# "The vitamin D report was received at the clinic on 20 November 2026" used to
+# be filed under the document's date, so the graph said the report arrived on
+# the day somebody typed the note up.
+
+def receipt_in(text, date="2026-10-17"):
+    facts = extract("D02", text, date)["facts"]
+    return next(f for f in facts if f["type"] == "receipt")
+
+
+def test_a_receipt_takes_the_date_its_own_sentence_gives():
+    f = receipt_in("The vitamin D report was received at the clinic on 20 November 2026.")
+    assert f["date"] == "2026-11-20"
+    assert f["date_source"] == "sentence"
+
+
+def test_a_receipt_date_without_a_year_is_read_against_the_record():
+    f = receipt_in("The vitamin D report was received at the clinic on 20 November.")
+    assert f["date"] == "2026-11-20"
+    assert f["date_source"] == "sentence"
+
+
+def test_a_receipt_sentence_with_no_date_falls_back_and_says_so():
+    f = receipt_in("The vitamin D report was received at the clinic.")
+    assert f["date"] == "2026-10-17"
+    assert f["date_source"] == "document"
+
+
+def test_a_date_in_a_neighbouring_sentence_is_not_the_receipts():
+    """Dates are read per sentence, exactly as negation is."""
+    f = receipt_in(
+        "The next appointment is on 5 December 2026. "
+        "The vitamin D report was received at the clinic on 20 November 2026."
+    )
+    assert f["date"] == "2026-11-20"
+
+
+def test_an_iso_date_in_the_sentence_is_used_as_written():
+    assert receipt_in("The vitamin D report was received on 2026-11-20.")["date"] == "2026-11-20"
+
+
+def test_a_month_first_date_is_read_too():
+    assert receipt_in("The vitamin D report was received on November 20, 2026.")["date"] == (
+        "2026-11-20")
+
+
+def test_sentence_date_finds_nothing_in_a_sentence_with_no_date():
+    assert sentence_date("The report was handed over at the front desk.", "2026-10-17") == ""
+
+
+def test_sentence_date_refuses_an_impossible_day():
+    assert sentence_date("Received on 40 November 2026.", "2026-10-17") == ""
+
+
+def test_a_request_still_carries_no_date_at_all():
+    """Only a receipt gained a date; a request having one is the bug the fact
+    shapes above exist to prevent."""
+    f = one("Please bring the vitamin D report on 20 November 2026.", "request")
+    assert "date" not in f and "date_source" not in f

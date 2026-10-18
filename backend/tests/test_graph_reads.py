@@ -285,6 +285,41 @@ def test_the_graph_view_keeps_a_receipt_chain(reads):
     assert kinds["fu:referral@D02-P1"] == "Receipt"
 
 
+
+# ---------------- the receipt's event date, as the graph shows it ----------------
+
+def test_pretty_date_reads_as_a_date_a_person_would_say():
+    assert g.pretty_date("2026-11-20") == "20 Nov 2026"
+    assert g.pretty_date("2026-01-03") == "3 Jan 2026"
+
+
+def test_pretty_date_leaves_anything_that_is_not_an_iso_date_alone():
+    assert g.pretty_date("") == ""
+    assert g.pretty_date(None) == ""
+    assert g.pretty_date("last Tuesday") == "last Tuesday"
+    assert g.pretty_date("2026-13-20") == "2026-13-20"
+
+
+def test_a_receipt_node_is_labelled_with_its_event_date(reads):
+    reads(
+        nodes=[
+            node("D02", "Document", status="confirmed", title="Clinic front-desk note"),
+            node("D02-P1", "EvidenceSpan", doc_id="D02"),
+            node("fu:vitamin_d_report@D02-P1", "Receipt", date="2026-11-20",
+                 date_source="sentence"),
+            node("fu:vitamin_d_report", "FollowUp", label="Vitamin D report"),
+        ],
+        edges=[
+            {"source": "D02", "target": "D02-P1", "type": "HAS_SPAN"},
+            {"source": "D02-P1", "target": "fu:vitamin_d_report@D02-P1",
+             "type": "DOCUMENTS_RECEIPT"},
+            {"source": "fu:vitamin_d_report@D02-P1", "target": "fu:vitamin_d_report",
+             "type": "FULFILLS"},
+        ],
+    )
+    labels = {n["id"]: n["label"] for n in g.subgraph(PID)["nodes"]}
+    assert labels["fu:vitamin_d_report@D02-P1"] == "Receipt 20 Nov 2026"
+
 # ---------------- why did this item change? ----------------
 # The Today card can now open both ends of the story, so each entry carries the
 # request that started the item and the newest receipt that settled it, plus
@@ -350,3 +385,4 @@ def test_an_entry_the_graph_no_longer_tracks_gains_no_sides(reads):
     )
     entry = g.latest_change(PID)["added"][0]
     assert "requested_by" not in entry and "receipt" not in entry and "path" not in entry
+
