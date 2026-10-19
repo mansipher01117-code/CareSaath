@@ -6,13 +6,53 @@ need to clarify before the appointment?"* with a source behind every claim —
 and show the exact graph path the answer came from.
 
 - **Live demo:** <https://caresaath-app.vercel.app>
-- **Demo video:** <VIDEO_LINK>
+- **Demo video:** <https://youtube.com/watch?v=7AlRPuM_bwQ>
 - **Track:** 01 — Agents That Act on Connected Data
 
 > Not a diagnostic tool — it only explains what the records say.
 > There is no sign-in: anyone who can reach the API can read every profile in it.
 
+[![Watch the demo](https://img.youtube.com/vi/7AlRPuM_bwQ/maxresdefault.jpg)](https://youtube.com/watch?v=7AlRPuM_bwQ)
+
+![CareSaath architecture](docs/caresaath_architecture.png)
+
 ---
+
+## Screenshots
+
+| Today: derived status + what changed | Only the connected item changes |
+|---|---|
+| ![Today](docs/screenshots/01_today.png) | ![What changed](docs/screenshots/03_what_changed.png) |
+| **Why? — request, receipt and the path between them** | **One item, two sources in the graph** |
+| ![Why](docs/screenshots/04_why.png) | ![Graph](docs/screenshots/05_graph_two_sources.png) |
+| **Ask: sourced answer + agent tool trace** | **Show in graph: the path behind the answer** |
+| ![Ask](docs/screenshots/06_ask_trace.png) | ![Show in graph](docs/screenshots/08_show_in_graph.png) |
+| **Human review before anything is evidence** | **Visit preparation sheet** |
+| ![Review](docs/screenshots/02_review.png) | ![Visit prep](docs/screenshots/10_visit_prep.png) |
+
+<details><summary>More: source chip and medical-advice refusal</summary>
+
+![Source](docs/screenshots/07_source.png)
+![Refusal](docs/screenshots/09_refusal.png)
+
+</details>
+
+## Try it in 2 minutes
+
+Open the [live demo](https://caresaath-app.vercel.app), create a profile, then add these
+records one by one (**Add record** → title → date → paste → **Extract & review** → **Confirm**):
+
+| # | Title | Date | Text |
+|---|---|---|---|
+| R1 | Widal report advice | 2026-10-10 | Please bring the Typhidot IgG IgM report to the next appointment. |
+| R2 | Doctor visit note | 2026-10-12 | Please bring the Typhidot IgG IgM report and the CBC report to the next appointment.<br><br>Next appointment confirmed for 20 October 2026 at 11:00 AM. |
+| R3 | Doctor phone advice | 2026-10-14 | Please bring the home temperature chart to the next appointment. |
+| R4 | Clinic front desk note | 2026-10-16 | The Typhidot IgG IgM report was received at the clinic on 16 October 2026. |
+| R5 | Clinic front desk note 2 | 2026-10-18 | The home temperature chart was received at the clinic on 18 October 2026. |
+
+(In R2, leave a blank line between the two sentences.) Then open **Today** (only the CBC report is
+still pending), tap **Why?**, open **Graph**, and in **Ask** try *"Which items are still pending
+before the appointment?"* and *"What medicine should he take?"*. All demo data is fictional.
 
 ## The problem
 
@@ -23,6 +63,8 @@ question *"what is still pending?"* has no answer except scrolling, and a new
 record never tells you what it changed and what it left alone.
 
 ## Graph model
+
+![Graph model](docs/caresaath_graph_model.png)
 
 ```mermaid
 graph LR
