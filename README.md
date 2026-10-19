@@ -7,6 +7,7 @@ and show the exact graph path the answer came from.
 
 - **Live demo:** <https://caresaath-app.vercel.app>
 - **Demo video:** <https://youtube.com/watch?v=7AlRPuM_bwQ>
+- **Blog link :** <https://medium.com/@yadavmansi0111207/caresaath-building-a-family-health-graph-an-ai-agent-can-act-on-12ac4afc9464?postPublishedType=initial>
 - **Track:** 01 — Agents That Act on Connected Data
 
 > Not a diagnostic tool — it only explains what the records say.
